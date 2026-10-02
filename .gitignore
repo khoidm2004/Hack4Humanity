@@ -1,5 +1,7 @@
 # Claude / AI tooling
 .claude/
+Artifacts/
+CLAUDE.md
 
 # Environment & secrets
 .env
