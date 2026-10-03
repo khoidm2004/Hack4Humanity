@@ -6,7 +6,8 @@ timestamps and decides CFR vs VFR. Everything downstream consumes the
 `VideoProbe` it produces.
 
 OpenCV here is the *headless* build (`opencv-python-headless`), so there is no
-`cv2.imshow`/`waitKey` - all visual output is written to disk as PNG.
+`cv2.imshow`/`waitKey`. This module only measures and builds in-memory frame
+data - writing anything to disk (as PNG) is a `scripts/` job.
 """
 
 from __future__ import annotations
@@ -123,13 +124,14 @@ def _fallback_fps(frame_times: np.ndarray, reported_fps: float) -> tuple[float, 
     )
 
 
-def probe_video(path: str | Path, sample_frame_dir: Path | None = None,
-                n_sample_frames: int = 12) -> VideoProbe:
+def probe_video(path: str | Path) -> VideoProbe:
     """Decode `path` end to end and measure it.
 
     Every frame is decoded and counted; `CAP_PROP_FRAME_COUNT` is reported but
-    never trusted. If `sample_frame_dir` is given, ~`n_sample_frames` evenly
-    spaced frames are written there as PNG for human inspection.
+    never trusted. This function only measures - it performs no file I/O;
+    callers that want sample frames or a contact sheet written to disk should
+    use `sample_frame_indices`/`build_contact_sheet` together with
+    `read_frames` from a `scripts/` entry point.
     """
     path = Path(path)
     cap = cv2.VideoCapture(str(path))
@@ -208,22 +210,23 @@ def probe_video(path: str | Path, sample_frame_dir: Path | None = None,
         interval_stats=interval_stats,
     )
 
-    if sample_frame_dir is not None:
-        write_sample_frames(probe, sample_frame_dir, n_sample_frames)
-
     return probe
 
 
-def write_contact_sheet(probe: VideoProbe, out_dir: Path, cols: int = 14,
-                        thumb_w: int = 192) -> Path:
-    """Write every frame of the video as one numbered grid image.
+def sample_frame_indices(probe: VideoProbe, n: int = 12) -> np.ndarray:
+    """Pick ~n evenly spaced, de-duplicated frame indices across the video."""
+    return np.unique(np.linspace(0, probe.decoded_frame_count - 1, n).astype(int))
+
+
+def build_contact_sheet(probe: VideoProbe, cols: int = 14,
+                        thumb_w: int = 192) -> np.ndarray:
+    """Build one numbered grid image of every frame in the video, in memory.
 
     This is what answers "what actually happens in this clip, and is it the same
     take as the other one" in a single look, without scrubbing a player that the
-    headless OpenCV build cannot open.
+    headless OpenCV build cannot open. Returns the image array; writing it to
+    disk is the caller's job (see `scripts/probe_videos.py`).
     """
-    out_dir = Path(out_dir)
-    out_dir.mkdir(parents=True, exist_ok=True)
     thumb_h = int(round(thumb_w * probe.height / probe.width))
 
     cap = cv2.VideoCapture(str(probe.path))
@@ -244,9 +247,7 @@ def write_contact_sheet(probe: VideoProbe, out_dir: Path, cols: int = 14,
                     (0, 255, 255), 1)
         sheet[r * thumb_h:(r + 1) * thumb_h, c * thumb_w:(c + 1) * thumb_w] = thumb
 
-    dest = out_dir / f"contactsheet_{probe.path.stem}.png"
-    cv2.imwrite(str(dest), sheet)
-    return dest
+    return sheet
 
 
 def read_frames(path: str | Path, indices: list[int]) -> dict[int, np.ndarray]:
@@ -267,25 +268,3 @@ def read_frames(path: str | Path, indices: list[int]) -> dict[int, np.ndarray]:
         i += 1
     cap.release()
     return out
-
-
-def write_sample_frames(probe: VideoProbe, out_dir: Path, n: int = 12) -> list[Path]:
-    """Write ~n evenly spaced frames as PNG so a human can look at the footage."""
-    out_dir = Path(out_dir)
-    out_dir.mkdir(parents=True, exist_ok=True)
-    stem = probe.path.stem
-    # Re-runs must not leave stale frames behind (filenames embed the timestamp).
-    for old in out_dir.glob(f"{stem}_f*.png"):
-        old.unlink()
-    idx = np.unique(np.linspace(0, probe.decoded_frame_count - 1, n).astype(int))
-    frames = read_frames(probe.path, list(idx))
-    written = []
-    for i in idx:
-        frame = frames.get(int(i))
-        if frame is None:
-            continue
-        t = probe.frame_times[i]
-        dest = out_dir / f"{stem}_f{int(i):05d}_t{t:07.3f}s.png"
-        cv2.imwrite(str(dest), frame)
-        written.append(dest)
-    return written
