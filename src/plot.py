@@ -19,18 +19,31 @@ from .swing import Swing
 def figure_3d(swing: Swing, metrics: dict | None = None) -> go.Figure:
     """Build the interactive 3D racket + racket-head-trajectory figure.
 
-    The racket is drawn as a line from the pivot (wrist) to the head tip for a
-    sample of orientations; the tip is the animated point of interest.
+    The racket-head path is drawn in two segments — before/at impact and after
+    impact — so the follow-through is clearly visible instead of appearing to
+    end at the impact peak.  The racket itself is drawn as a line from the
+    pivot (wrist) to the head tip for a sample of orientations.
     """
     fig = go.Figure()
+    imp = swing.impact_idx
 
-    # Racket-head trajectory (pivot model) — primary curve.
+    # Racket-head trajectory (pivot model) — primary curve, split at impact.
+    pre = slice(0, imp + 1)
+    post = slice(imp, None)
     fig.add_trace(go.Scatter3d(
-        x=swing.tip[:, 0], y=swing.tip[:, 1], z=swing.tip[:, 2],
+        x=swing.tip[pre, 0], y=swing.tip[pre, 1], z=swing.tip[pre, 2],
         mode="lines",
         line=dict(color="#00E5FF", width=4),
-        name="Racket path (pivot)",
-        hovertext=[f"t={t:.3f}s" for t in swing.t],
+        name="Path → impact",
+        hovertext=[f"t={t:.3f}s (pre)" for t in swing.t[pre]],
+        hovertemplate="%{hovertext}<extra></extra>",
+    ))
+    fig.add_trace(go.Scatter3d(
+        x=swing.tip[post, 0], y=swing.tip[post, 1], z=swing.tip[post, 2],
+        mode="lines",
+        line=dict(color="#69F0AE", width=4),
+        name="Path after impact (follow-through)",
+        hovertext=[f"t={t:.3f}s (post)" for t in swing.t[post]],
         hovertemplate="%{hovertext}<extra></extra>",
     ))
 
@@ -55,11 +68,11 @@ def figure_3d(swing: Swing, metrics: dict | None = None) -> go.Figure:
     ))
 
     # Impact point.
-    imp = swing.tip[swing.impact_idx]
     fig.add_trace(go.Scatter3d(
-        x=[imp[0]], y=[imp[1]], z=[imp[2]], mode="markers",
+        x=[swing.tip[imp, 0]], y=[swing.tip[imp, 1]], z=[swing.tip[imp, 2]],
+        mode="markers",
         marker=dict(size=8, color="#FF0000"),
-        name=f"Impact (t={swing.t[swing.impact_idx]:.2f}s)",
+        name=f"Impact (t={swing.t[imp]:.2f}s)",
     ))
 
     # Axis-locked, equal aspect for a truthful shape.
@@ -70,7 +83,7 @@ def figure_3d(swing: Swing, metrics: dict | None = None) -> go.Figure:
         template="plotly_dark",
         height=620,
         margin=dict(l=0, r=0, t=30, b=0),
-        title="Racket-head trajectory (IMU-derived)",
+        title="Racket-head trajectory (IMU-derived, string-ringing filtered)",
         legend=dict(orientation="h", y=1.02),
     )
     return fig

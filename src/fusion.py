@@ -225,13 +225,21 @@ def reconstruct(accel: np.ndarray,
     Returns
     -------
     Swing
-        Filled contract record (validated).
+        Filled contract record (validated).  ``gyro_deg``/``accel`` inside the
+        record are the RAW signals (for plotting/metrics); the gesture
+        low-pass (racket-string ringing removal) is applied to the fusion
+        inputs only.
     """
-    gravity = estimate_gravity(accel)
-    quat = integrate_orientation(accel, gyro_deg, gravity, alpha=alpha)
+    # Gesture-band low-pass: the strings ring at ~165 Hz after impact and that
+    # is not hand motion — keep only the actual swing shape (< ~25 Hz).
+    accel_lp = _lowpass(accel)
+    gyro_lp = _lowpass(gyro_deg)
+
+    gravity = estimate_gravity(accel_lp)
+    quat = integrate_orientation(accel_lp, gyro_lp, gravity, alpha=alpha)
     tip = pivot_tip(quat)
-    cog = rest_to_rest_cog(accel, quat, gravity)
-    impact_idx = detect_impact(accel, gyro_deg)
+    cog = rest_to_rest_cog(accel_lp, quat, gravity)
+    impact_idx = detect_impact(accel_lp, gyro_lp)
 
     t = np.arange(len(accel), dtype=float) * config.DT
     swing = Swing(t=t, quat=quat, tip=tip, cog=cog,
@@ -245,6 +253,21 @@ def _highpass(x: np.ndarray, cutoff_hz: float = config.R2R_HP_CUTOFF_HZ) -> np.n
     if cutoff_hz <= 0 or cutoff_hz >= nyq:
         return x
     sos = butter(2, cutoff_hz / nyq, btype="high", output="sos")
+    return sosfiltfilt(sos, x, axis=0)
+
+
+def _lowpass(x: np.ndarray, cutoff_hz: float = config.GESTURE_LP_HZ) -> np.ndarray:
+    """Zero-phase 4th-order Butterworth low-pass (gesture band).
+
+    Removes the racket-string ringing (~165 Hz after ball impact, measured in
+    ``ay``/``az``) while keeping the swing shape (all gesture energy is below
+    ~25 Hz).  Applied to the *fusion inputs* only — the raw signals stay
+    untouched in the ``Swing`` record for plotting and metrics.
+    """
+    nyq = 0.5 * config.FS
+    if cutoff_hz <= 0 or cutoff_hz >= nyq:
+        return x
+    sos = butter(4, cutoff_hz / nyq, btype="low", output="sos")
     return sosfiltfilt(sos, x, axis=0)
 
 

@@ -191,6 +191,7 @@ def draw_overlay(
     scale: float = config.SLOWMO_SCALE,
     offset: float = 0.0,
     *,
+    dot_idx: int | None = None,
     show_path: bool = True,
     show_dot: bool = True,
     show_impact: bool = True,
@@ -209,6 +210,10 @@ def draw_overlay(
     fps : video frames per second
     scale : slow-motion factor (video_time = imu_time*scale + offset)
     offset : rough sync offset in seconds
+    dot_idx : int, optional
+        Exact IMU sample index for the animated dot.  When given, this wins
+        over the ``t_video``-based ``scale/offset`` mapping (used when the
+        per-video synced table from ``scripts/run_sync.py`` is available).
     ...
     """
     out = frame.copy()
@@ -229,7 +234,10 @@ def draw_overlay(
 
     # Animated dot at the current video time.
     if show_dot:
-        idx = _index_for_video_time(swing.t, t_video, fps, scale, offset)
+        if dot_idx is None:
+            idx = _index_for_video_time(swing.t, t_video, fps, scale, offset)
+        else:
+            idx = int(dot_idx)
         dot = project_points(cam, swing.tip[idx]).ravel()
         cv2.circle(out, tuple(int(round(v)) for v in dot), 7, dot_color, -1)
         cv2.circle(out, tuple(int(round(v)) for v in dot), 12, (255, 255, 255), 2)

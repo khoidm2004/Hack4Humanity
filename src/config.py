@@ -58,9 +58,24 @@ R2R_SAVGOL_WINDOW = 15       # Savitzky-Golay smoothing window (odd, samples)
 # when no true static segment exists.
 GRAVITY_REF_SAMPLES = 25
 
+# --------------------------------------------------------------------------- #
+# Gesture low-pass filter (racket-string ringing removal)
+# --------------------------------------------------------------------------- #
+# The sensor is mounted on the racket strings; the ball impact rings the
+# strings at ~165 Hz (seen as strong peaks in `ay`/`az` after contact,
+# SYNC_METHOD.md).  That ringing is NOT hand motion and must not leak into
+# orientation / position.  Gesture content sits well below ~25 Hz, so a
+# 4th-order Butterworth low-pass at this cutoff removes the ringing while
+# keeping the swing shape intact.
+GESTURE_LP_HZ = 25.0
+
 # Complementary-filter weight applied to the accel-measured roll/pitch.
-# 0.0 == pure gyro integration.
-COMP_FILTER_ALPHA = 0.4
+# This sensor is mounted on the strings: impact and string vibration make its
+# acceleration unsuitable as a gravity reference during the swing.  The
+# previous 0.4 correction pulled the gyro orientation backwards and suppressed
+# the follow-through.  Keep gyro integration as the default; setting a nonzero
+# value remains an explicit experiment for data with a reliable gravity signal.
+COMP_FILTER_ALPHA = 0.0
 
 # --------------------------------------------------------------------------- #
 # Impact detection
@@ -73,4 +88,8 @@ IMPACT_JERK_SEARCH_WIDTH = 12      # +/- samples around gyro peak on each side
 # --------------------------------------------------------------------------- #
 # Video / overlay mapping (used by Person B)
 # --------------------------------------------------------------------------- #
-SLOWMO_SCALE = 8.33          # slow-motion factor (video_time = imu_time * scale)
+# NOTE: SYNC_METHOD.md measured both videos as real-time 30 fps footage
+# (best time-scale ≈ 1.0x, slow motion excluded).  When a per-video sync table
+# exists (data/synced_data_<angle>.csv from scripts/run_sync.py) the app uses
+# its exact frame_index mapping and this value is only a fallback.
+SLOWMO_SCALE = 1.0           # real-time footage; was 8.33 under the old assumption

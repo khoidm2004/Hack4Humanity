@@ -28,9 +28,10 @@ from src import (  # noqa: E402
 
 @st.cache_data(show_spinner=False)
 def load_artifacts():
-    """Load the swing contract + video metadata (cached for smooth demo)."""
+    """Load the swing contract + video metadata + sync tables (cached)."""
     from src.swing import Swing
     from src.video import probe
+    from src.synced_data import SyncedData
 
     swing_path = config.SWING_NPZ
     if not Path(swing_path).exists():
@@ -44,15 +45,37 @@ def load_artifacts():
     for p in sorted(config.VIDEO_DIR.glob("*.mp4")):
         videos.append((p.name, probe(str(p))))
 
+    # Per-video IMU<->frame sync tables (from scripts/run_sync.py).
+    synced = SyncedData.all_angles()
+
     from src.metrics import compute_metrics
     metrics = compute_metrics(swing)
-    return swing, videos, metrics
+    return swing, videos, metrics, synced
 
 
 @st.cache_data(show_spinner=False)
 def get_frame(meta_path: str, idx: int) -> "np.ndarray":
     from src.video import frame
     return frame(meta_path, idx)
+
+
+@st.cache_data(show_spinner=False)
+def get_impact_pixel(video_path: str) -> tuple[float, float] | None:
+    """Find the ball-contact pixel using the sync pipeline's ball detector."""
+    import numpy as np
+    from src.sync.video_motion import ball_contact, motion_energy
+    from src.sync.video_probe import probe_video
+
+    path = Path(video_path)
+    probe = probe_video(path)
+    energy = motion_energy(path, probe.frame_times)
+    lo = max(0, energy.peak_frame - 25)
+    hi = min(probe.decoded_frame_count - 1, energy.peak_frame + 25)
+    contact = ball_contact(path, lo, hi)
+    if not contact.found or not contact.is_strike or len(contact.frames) == 0:
+        return None
+    sample = int(np.argmin(np.abs(contact.frames - contact.contact_frame_exact)))
+    return float(contact.xs[sample]), float(contact.ys[sample])
 
 
 def render_overlay_controls(swing):
@@ -89,8 +112,12 @@ def render_overlay_controls(swing):
         )
 
 
-def build_overlay_camera(meta, opts):
-    """Build a Camera for the current view from intrinsics + nudge sliders."""
+def build_overlay_camera(meta, opts, swing=None, impact_pixel=None):
+    """Build an approximate view and anchor the impact point to the ball.
+
+    A single 2D point anchors translation only; yaw/elevation/zoom are still
+    approximate and remain adjustable in the sidebar.
+    """
     from src import camera
     import numpy as _np
     K = camera.estimate_intrinsics(meta.width, meta.height, opts["fov"])
@@ -99,8 +126,14 @@ def build_overlay_camera(meta, opts):
         _np.array([0.0, 0.0, 0.0]), _np.array([0.0, 0.0, 10.0]),
         meta.width, meta.height,
     )
-    return camera.nudge(cam, yaw=opts["yaw"], elev=opts["elev"], zoom=opts["zoom"],
-                        pan_x=opts["pan_x"], pan_y=opts["pan_y"])
+    cam = camera.nudge(cam, yaw=opts["yaw"], elev=opts["elev"],
+                       zoom=opts["zoom"])
+    pan_x, pan_y = opts["pan_x"], opts["pan_y"]
+    if swing is not None and impact_pixel is not None:
+        projected = camera.project_points(cam, swing.tip[swing.impact_idx])[0]
+        pan_x += float(impact_pixel[0] - projected[0])
+        pan_y += float(impact_pixel[1] - projected[1])
+    return camera.nudge(cam, pan_x=pan_x, pan_y=pan_y)
 
 
 def main():
@@ -108,7 +141,7 @@ def main():
                        layout="wide")
     st.title("🎾 Hack4Humanity — IMU Racket Path Projection")
 
-    swing, videos, metrics = load_artifacts()
+    swing, videos, metrics, synced = load_artifacts()
 
     tab_video, tab_3d, tab_signals, tab_metrics = st.tabs(
         ["Swing + Video", "3D Trajectory", "Signals", "Metrics"])
@@ -130,8 +163,10 @@ def main():
             names = [name for name, _ in videos]
             sel = st.selectbox("Camera", names)
             meta = dict(videos)[sel]
-
-            cam = build_overlay_camera(meta, opts)
+            sync_table = synced.get(sel)
+            syncable = bool(sync_table is not None and sync_table.syncable)
+            impact_pixel = get_impact_pixel(meta.path) if syncable else None
+            cam = build_overlay_camera(meta, opts, swing, impact_pixel)
 
             # ---- Mode C fallback: side-by-side (video | 3D) ---- #
             side_by_side = st.checkbox(
@@ -141,7 +176,8 @@ def main():
 
             if side_by_side:
                 col_l, col_r = st.columns(2)
-                img = get_frame(meta.path, frame_idx_default(meta, metrics))
+                img = get_frame(meta.path, frame_idx_default(meta, metrics,
+                                                             sync_table))
                 with col_l:
                     st.image(cv2.cvtColor(img, cv2.COLOR_BGR2RGB),
                              caption="slow-motion video")
@@ -153,65 +189,18 @@ def main():
                 col_l2, _col_sp = st.columns([1, 1])
                 with col_l2:
                     f2 = st.slider("frame", 0, meta.n_frames - 1,
-                                   frame_idx_default(meta, metrics))
+                                   frame_idx_default(meta, metrics, sync_table))
                 img2 = get_frame(meta.path, f2)
                 st.image(cv2.cvtColor(img2, cv2.COLOR_BGR2RGB),
                          caption=f"frame {f2}")
             else:
-                if "playback" not in st.session_state:
-                    st.session_state.playback = False
-
-                col_play, col_scrub, col_fps = st.columns([1, 6, 2])
-                with col_play:
-                    if st.button("▶ Play" if not st.session_state.playback else "⏸ Pause"):
-                        st.session_state.playback = not st.session_state.playback
-                with col_scrub:
-                    frame_idx = st.slider("frame", 0, meta.n_frames - 1,
-                                          frame_idx_default(meta, metrics),
-                                          key="scrub")
-                with col_fps:
-                    play_speed = st.selectbox("play speed", [1, 2, 4, 8], index=0)
-
-                # ---- Overlay the swing path on the current frame ---- #
-                t_video = frame_idx / meta.fps
-                img = get_frame(meta.path, frame_idx)
-
-                from src import camera as _cam
-                overlaid = _cam.draw_overlay(
-                    img, cam, swing, t_video, meta.fps,
-                    scale=opts["scale"], offset=opts["offset"],
-                    show_path=opts["show_path"], show_dot=opts["show_dot"],
-                    show_impact=opts["show_impact"],
-                )
-                st.image(cv2.cvtColor(overlaid, cv2.COLOR_BGR2RGB),
-                         caption=f"frame {frame_idx} · t_video={t_video:.2f}s")
-
-                st.caption("🔵 path (pivot model) · 🔴 animated dot · "
-                           "impact ring · grey = sliders aligned to racket")
-
-                # ---- Simple playback loop via placeholder ---- #
-                import time  # noqa: PLC0415
-                placeholder = st.empty()
-                if st.session_state.playback:
-                    idx = frame_idx
-                    step = [1, 2, 4, 8][play_speed_index(play_speed)]
-                    n = meta.n_frames
-                    while st.session_state.playback:
-                        idx = (idx + step) % n
-                        t_vlog = idx / meta.fps
-                        fr = get_frame(meta.path, int(idx))
-                        ov = _cam.draw_overlay(
-                            fr, cam, swing, t_vlog, meta.fps,
-                            scale=opts["scale"], offset=opts["offset"],
-                            show_path=opts["show_path"], show_dot=opts["show_dot"],
-                            show_impact=opts["show_impact"])
-                        placeholder.image(
-                            cv2.cvtColor(ov, cv2.COLOR_BGR2RGB),
-                            caption=f"frame {idx}")
-                        time.sleep(0.02)
-                        st.session_state.scrub = idx
-                        st.session_state.playback = True
-                    placeholder.empty()
+                if not syncable:
+                    st.warning(
+                        f"⚠️ `{sel}` không có sync data khả dụng "
+                        "(video khác take, không có cú đánh — xem SYNC_METHOD.md). "
+                        "Chuyển sang 'Side-by-side fallback' hoặc tab 3D để xem quỹ đạo."
+                    )
+                _player(meta, cam, swing, opts, metrics, sync_table)
 
     with tab_3d:
         from src.plot import figure_3d
@@ -230,14 +219,95 @@ def main():
         st.caption("Head speed uses the pivot model (v = |ω| × r).")
 
 
-def play_speed_index(value) -> int:
-    return [1, 2, 4, 8].index(value)
+def frame_idx_default(meta, metrics, sync_table=None) -> int:
+    """Default scrub position.
 
-
-def frame_idx_default(meta, metrics) -> int:
-    """Default scrub position = the impact frame (roughly synced)."""
+    With a sync table, this is the video frame matching the IMU impact
+    (e.g. angle_1: sample 205 -> frame ~132).  Without one, it falls back to
+    the old rough mapping (scale * fps).
+    """
+    if sync_table is not None and sync_table.syncable:
+        return min(meta.n_frames - 1,
+                   max(0, sync_table.impact_frame(metrics["impact_idx"])))
     imp_frame = int(metrics["impact_time_s"] * config.SLOWMO_SCALE * meta.fps)
     return min(meta.n_frames - 1, max(0, imp_frame))
+
+
+# --------------------------------------------------------------------------- #
+# Video player (fragment) — scrub + play/pause
+# --------------------------------------------------------------------------- #
+def _toggle_playback() -> None:
+    st.session_state.playback = not st.session_state.playback
+
+
+def _sync_scrub() -> None:
+    """Slider on_change: keep frame_pos in sync with the widget value."""
+    st.session_state.frame_pos = st.session_state.scrub
+
+
+@st.fragment(run_every=0.1)
+def _player(meta, cam, swing, opts, metrics, sync_table=None):
+    """Overlay player: scrub slider + play/pause with an animated dot.
+
+    ``frame_pos`` (a plain session-state value, NOT a widget key) is the
+    source of truth.  The slider widget state is only ever read here and in
+    its own ``on_change`` callback — never assigned after instantiation.
+
+    When a sync table exists, the animated dot is placed with the exact
+    IMU sample that maps to the current frame (``dot_idx``); otherwise the
+    rough ``scale/offset`` mapping is used.
+    """
+    from src import camera as _cam
+
+    st.session_state.setdefault("frame_pos", frame_idx_default(meta, metrics,
+                                                               sync_table))
+    st.session_state.setdefault("playback", False)
+
+    # Update the widget key before the slider is instantiated. This keeps its
+    # thumb aligned with the frame advanced by the playback fragment.
+    st.session_state.scrub = st.session_state.frame_pos
+
+    col_play, col_scrub, col_fps = st.columns([1, 6, 2])
+    with col_play:
+        st.button("▶ Play" if not st.session_state.playback else "⏸ Pause",
+                  on_click=_toggle_playback)
+    with col_scrub:
+        st.slider("frame", 0, meta.n_frames - 1,
+                  key="scrub", on_change=_sync_scrub)
+    with col_fps:
+        play_speed = st.selectbox("play speed", ["1×", "2×", "4×", "8×"],
+                                  index=0)
+
+    idx = st.session_state.frame_pos
+    if st.session_state.playback:
+        # Advance at the video's true rate: with run_every=0.1 s, stepping
+        # fps*0.1*factor frames per tick plays the clip at the selected speed.
+        factor = [1, 2, 4, 8][["1×", "2×", "4×", "8×"].index(play_speed)]
+        step = max(1, int(round(meta.fps * 0.1 * factor)))
+        st.session_state.frame_pos = (idx + step) % meta.n_frames
+
+    # ---- Overlay the swing path on the current frame ---- #
+    t_video = idx / meta.fps
+    img = get_frame(meta.path, int(idx))
+
+    if sync_table is not None and sync_table.syncable:
+        dot_idx = sync_table.imu_idx_for_frame(int(idx))
+        scale, offset = 1.0, 0.0   # unused when dot_idx is passed
+    else:
+        dot_idx = None
+        scale, offset = opts["scale"], opts["offset"]
+
+    overlaid = _cam.draw_overlay(
+        img, cam, swing, t_video, meta.fps,
+        scale=scale, offset=offset, dot_idx=dot_idx,
+        show_path=opts["show_path"], show_dot=opts["show_dot"],
+        show_impact=opts["show_impact"],
+    )
+    st.image(cv2.cvtColor(overlaid, cv2.COLOR_BGR2RGB),
+             caption=f"frame {idx} / {meta.n_frames - 1} · "
+                     f"t_video={t_video:.2f}s")
+    st.caption("🔵 path (pivot model) · 🔴 animated dot · "
+               "impact ring · grey = sliders aligned to racket")
 
 
 if __name__ == "__main__":
