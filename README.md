@@ -7,7 +7,7 @@ computer-vision tracking, no ML, and only rough time sync (not pixel-perfect).
 The persuasive point for the judges: the curve is computed from the IMU sensor,
 not inferred by an AI from the video.
 
-## Project pipelie
+## Project pipeline
 **Sensor fusion** — Sync data
 - Estimate gravity reference, remove gravity + string-ringing noise.
 - Integrate gyro into orientation (quaternions) with complementary filtering.
@@ -61,4 +61,57 @@ src/
 app.py                       # Streamlit dashboard ()
 scripts/verify_fusion.py     # sanity check + writes swing.npz
 scripts/mock_swing.py        # synthetic swing for parallel dev / fallback
+```
+
+## Physics & computations
+
+All sensor-fusion math lives in **`src/fusion.py`** (results are wrapped by
+`src/metrics.py`). Raw data: 400 samples of `ax,ay,az,gx,gy,gz` at 416 Hz
+(`dt = 1/416 s`), accel in m/s², gyro in deg/s.
+
+### 1. Gravity reference — `estimate_gravity`
+```
+g_ref = mean( accel[0:GRAVITY_REF_SAMPLES] )     # steady-ish window
+g     = g_ref / ||g_ref||  *  9.80665             # normalise to |g|
+```
+
+### 2. Orientation from gyro — `integrate_orientation`
+```
+ω[t] = deg2rad( gx,gy,gz )[t]          # deg/s -> rad/s
+θ[t] = ||ω[t]|| · dt                    # angle swept in one sample
+dq[t] = [cos(θ/2), (ω/||ω||)·sin(θ/2)]  # delta quaternion
+R[t]  = R[t-1] ⊗ dq[t]                  # accumulate in world frame (quat product)
+q[t]  = quat(R[t])                      # stored as (w, x, y, z)
+```
+An optional complementary filter nudges roll/pitch toward the accel-measured
+gravity direction (weight `alpha`; default `0.0` = pure gyro integration).
+
+### 3. Racket-head path (pivot model) — `pivot_tip`
+```
+tip(t) = R(t) · [0, 0, L] ,   L = RACKET_TIP_LEN = 0.686 m
+```
+The wrist is assumed nearly fixed, so the head tip traces the surface of a
+sphere of radius `L` around the wrist — the primary overlay curve.
+
+### 4. Sensor path (rest-to-rest) — `rest_to_rest_cog`
+```
+a_world = R(t) · a_sensor                      # rotate accel to world frame
+a_lin   = HP(a_world)                          # high-pass (~0.8 Hz) removes gravity
+v[t]    = Σ a_lin[i]·dt  ,  detrend → v[0]≈v[N]≈0
+p[t]    = Σ v[i]·dt       ,  detrend → path centred at origin
+```
+
+### 5. Impact (ball contact) — `detect_impact`
+```
+t_gyro = argmax ||gx,gy,gz||          # peak angular speed
+jerk   = ||Δaccel / dt||              # magnitude of accel jerk
+impact = argmax(jerk) in a ±12-sample window around t_gyro
+```
+
+### 6. Metrics — `compute_metrics`
+```
+v_head   = ||ω|| · L            m/s        % peak racket-head speed  (ω in rad/s)
+g_force  = ||a|| / 9.80665                 % peak specific force
+RPM      = ||ω|| · 60 / (2π)
+duration = t[impact] − t[swing onset]
 ```
