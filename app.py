@@ -196,9 +196,7 @@ def main():
             else:
                 if not syncable:
                     st.warning(
-                        f"⚠️ `{sel}` không có sync data khả dụng "
-                        "(video khác take, không có cú đánh — xem SYNC_METHOD.md). "
-                        "Chuyển sang 'Side-by-side fallback' hoặc tab 3D để xem quỹ đạo."
+                        f"⚠️ `{sel}` No sync data is available"
                     )
                 _player(meta, cam, swing, opts, metrics, sync_table)
 
