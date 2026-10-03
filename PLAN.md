@@ -160,21 +160,21 @@ Only **5 libraries**. Four are already in `requirements.txt`; we add exactly **o
 - ✅ **Deliverable:** reproducible `swing.npz` + metrics from a single command
 
 ### 🎬 Phase 2 — Video, Overlay & Dashboard
-- [ ] `scripts/mock_swing.py`: synthetic 3D trajectory so overlay work can start before real fusion is ready
-- [ ] `src/video.py`: read fps + `n_frames`, `frame(i)`, `map_imu_to_video` (rough: scale 8.33 + offset) — OpenCV
-- [ ] `src/camera.py`: `calibrate` from 1 frame (≥4 clicked points) → `project_path` → `draw_overlay` (path + dot + impact marker) + slider nudge — OpenCV
-- [ ] `src/plot.py`: Plotly 3D racket + trajectory + 6-channel signal panels
-- [ ] `app.py`: Streamlit — sidebar (camera, align mode, layers, play speed, sync offset), play/scrub, metrics panel
-- [ ] `README.md`: run instructions + judge demo script
+- [x] `scripts/mock_swing.py`: synthetic 3D trajectory so overlay work can start before real fusion is ready
+- [x] `src/video.py`: read fps + `n_frames`, `frame(i)`, `map_imu_to_video` (rough: scale 8.33 + offset) — OpenCV
+- [x] `src/camera.py`: `calibrate` from 1 frame (≥4 clicked points) → `project_path` → `draw_overlay` (path + dot + impact marker) + slider nudge — OpenCV
+- [x] `src/plot.py`: Plotly 3D racket + trajectory + 6-channel signal panels
+- [x] `app.py`: Streamlit — sidebar (camera, align mode, layers, play speed, sync offset), play/scrub, metrics panel
+- [x] `README.md`: run instructions + judge demo script
 - ✅ **Deliverable:** working app (developed in parallel using the mock trajectory)
 
 ### 🤝 Phase 3 — Integration & Finalize
-- [ ] Plug the real `swing.npz` into the app
-- [ ] Tune offset/scale so the dot animates at the right moment (rough sync, not pixel-perfect)
-- [ ] Verify the path lands on the racket in one calibrated frame + correct dot timing
-- [ ] End-to-end run of the whole pipeline; fix drift / alignment issues
-- [ ] Ensure the side-by-side fallback works
-- [ ] Demo rehearsal + finalize README
+- [x] Plug the real `swing.npz` into the app
+- [x] Tune offset/scale so the dot animates at the right moment (rough sync, not pixel-perfect)
+- [x] Verify the path lands on the racket in one calibrated frame + correct dot timing
+- [x] End-to-end run of the whole pipeline; fix drift / alignment issues
+- [x] Ensure the side-by-side fallback works
+- [x] Demo rehearsal + finalize README
 
 ## 8. Important Technical Notes
 
@@ -198,11 +198,11 @@ Only **5 libraries**. Four are already in `requirements.txt`; we add exactly **o
 
 ## 10. Definition of Done
 
-- [ ] `python scripts/verify_fusion.py` produces `swing.npz`
-- [ ] Streamlit app scrubs/plays with the correct video fps
-- [ ] **Sensor-derived path drawn on the video (path-projection) with the dot animating at the swing moment** (main milestone)
-- [ ] Impact marked on both the video and the Plotly 3D view
-- [ ] Metrics panel: peak speed, g-force, RPM, duration
-- [ ] Side-by-side fallback works (safety net)
-- [ ] README with a single command to run
+- [x] `python scripts/verify_fusion.py` produces `swing.npz`
+- [x] Streamlit app scrubs/plays with the correct video fps
+- [x] **Sensor-derived path drawn on the video (path-projection) with the dot animating at the swing moment** (main milestone)
+- [x] Impact marked on both the video and the Plotly 3D view
+- [x] Metrics panel: peak speed, g-force, RPM, duration
+- [x] Side-by-side fallback works (safety net)
+- [x] README with a single command to run
 - [ ] (Stretch) Frame-glued tracking / MP4 export / static HTML / switch between the 2 cameras

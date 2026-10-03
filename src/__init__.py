@@ -1,17 +1,17 @@
-"""Person A — sensor-fusion core package.
+"""Person A + Person B — complete reconstruction & overlay package.
 
-Exposed top-level API (used by scripts and Person B):
+Public API:
 
-    load
-    swing.Swing
-    fusion.reconstruct
-    metrics.compute_metrics
+  * Sensor core (Person A): load_csv, to_signal_arrays, reconstruct,
+    compute_metrics, Swing
+  * Video & overlay (Person B): video.probe/frame/map_imu_to_video,
+    camera.calibrate/project_path/draw_overlay, plot.figure_3d/figure_signals
 """
 
 from . import config
 from .load import load_csv, to_signal_arrays
 from .swing import Swing
-from .fusion import reconstruct
+from .fusion import reconstruct, estimate_gravity, integrate_orientation
 from .metrics import compute_metrics
 
 __all__ = [
@@ -22,3 +22,4 @@ __all__ = [
     "reconstruct",
     "compute_metrics",
 ]
+
