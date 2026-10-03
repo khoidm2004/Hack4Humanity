@@ -1,5 +1,20 @@
 # Hack For Humanity Hackathon
 
+## Project
+
+Reconstruct a 3D representation of a tennis shot (swing) from raw IMU sensor
+data alone — accelerometer + gyroscope readings, no cameras or pre-labeled
+pose data.
+
+- `data/raw_data.csv` — raw IMU samples (`ax,ay,az,gx,gy,gz`): 3-axis
+  accelerometer + 3-axis gyroscope, 400 samples at a 416Hz sampling rate.
+- `data/raw_data_visualized.png` — a plotted view of that signal.
+- `data/video/*.mp4` — reference footage of the actual tennis shots, for
+  visual ground-truth comparison.
+
+See `pre-hackathon.md` for the full technical plan (pipeline, model choices,
+execution timeline).
+
 ## Development Setup
 
 This project uses [`uv`](https://docs.astral.sh/uv/) (Astral's Python package and dependency manager) for managing dependencies and the Python environment.
