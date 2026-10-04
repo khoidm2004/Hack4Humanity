@@ -159,10 +159,13 @@ number — the same fitting procedure, re-run.
   pivot really being a point on a translating forearm.
 - **`FS = 416` is still an assumption**, never measured — there is no static
   segment in the record to calibrate against (`|a|` over samples 0–24 averages
-  0.763 g, not 1.000). At 240 fps capture the 400-sample record maps to frames
-  ≈15–246 while angle_1 has 226, so ~22 tail samples fall outside the clip and
-  are marked `frame_index = -1`. Expected for an impact-centred capture, but it
-  is the one loose end in an otherwise self-consistent picture.
+  0.763 g, not 1.000). At 240 fps capture the 400-sample record extends past
+  the clip at both ends: **365 of 400 samples map inside angle_1's 226 frames,
+  so 35 are marked `frame_index = -1`** (measured, not estimated — an earlier
+  draft of this note and of `Artifacts/plan.md` said "~22", which was an
+  arithmetic slip; the window the overlay actually uses, samples 175–225, is
+  unaffected). Expected for an impact-centred capture that outlasts the clip,
+  but it is the one loose end in an otherwise self-consistent picture.
 - **The pivot lever is three different numbers.** `RACKET_TIP_LEN = 0.686`
   (butt→tip), the measured wrist→annotated-head rim 0.544 m, and the unused
   `L_HANDLE = 0.20` implying 0.486. The sensor is on the *strings*, at a fourth,
