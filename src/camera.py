@@ -7,8 +7,8 @@ Implements the "path-projection" overlay pipeline:
    racket geometry.
 2. ``project_path`` — project the entire 3D racket-head trajectory onto the
    image as a 2D curve via ``cv2.projectPoints``.
-3. ``draw_overlay`` — draw the static path polyline, an animated dot for a
-   given video time, and the impact marker.
+3. ``draw_overlay`` — draw a windowed path trail around the current sample,
+   an animated dot for a given video time, and the impact marker.
 
 The intrinsics are estimated from an assumed horizontal FOV (~60°) as the
 plan requires; sliders refine pose/zoom when solvePnP is degenerate.
@@ -437,6 +437,29 @@ def _index_for_video_time(swing_t: np.ndarray, t_video: float,
 _DRAW_LIMIT = 1e5
 
 
+def path_window(n_samples: int, idx: int) -> tuple[int, int]:
+    """Inclusive sample range of the polyline to draw around sample ``idx``.
+
+    `draw_overlay` used to project ALL of `swing.tip` as one static polyline.
+    At 240 fps capture the 400-sample record spans ~230 video frames while the
+    swing occupies ~30, so the drawn path held ~8x the motion belonging to the
+    frame on screen: a double loop where the footage shows one sweep, and the
+    same picture at every frame regardless of reconstruction quality.
+
+    The window is stated in VIDEO FRAMES (`config.PATH_TRAIL_FRAMES` /
+    `PATH_LEAD_FRAMES`) and converted with `FS / CAPTURE_FPS` IMU samples per
+    frame, so it stays the same amount of *visible* motion if either rate is
+    ever revised.  At FS=416, CAPTURE_FPS=240 that is 1.733 samples per frame:
+    21 samples behind, 7 ahead, a 29-sample trail of ~0.12 s of playback.
+    """
+    spf = config.FS / float(config.CAPTURE_FPS)
+    back = int(round(config.PATH_TRAIL_FRAMES * spf))
+    fwd = int(round(config.PATH_LEAD_FRAMES * spf))
+    lo = max(0, int(idx) - back)
+    hi = min(int(n_samples) - 1, int(idx) + fwd)
+    return lo, hi
+
+
 def _drawable(pts: np.ndarray) -> np.ndarray:
     """Clamp projected pixels into a range ``int32`` can hold.
 
@@ -470,6 +493,8 @@ def draw_overlay(
     path_color=(0, 255, 255),
     dot_color=(0, 0, 255),
     impact_color=(255, 0, 0),
+    path_window_idx: tuple[int, int] | None = None,
+    path_fade: bool = True,
 ) -> np.ndarray:
     """Draw the projected path, animated dot and impact marker onto a frame.
 
@@ -486,16 +511,51 @@ def draw_overlay(
         Exact IMU sample index for the animated dot.  When given, this wins
         over the ``t_video``-based ``scale/offset`` mapping (used when the
         per-video synced table from ``scripts/run_sync.py`` is available).
+    path_window_idx : (int, int), optional
+        Inclusive sample range to draw the path over.  Defaults to
+        ``path_window(len(swing.tip), idx)`` — a trail BEHIND/AHEAD of the
+        current sample (``config.PATH_TRAIL_FRAMES``/``PATH_LEAD_FRAMES``),
+        not the whole record.  Pass ``(0, len(swing.tip) - 1)`` to force the
+        old whole-record polyline (used for before/after comparisons).
+    path_fade : bool
+        Draw the trail dim/thin at its oldest end and bright/thick at the
+        current sample, so it reads as a direction of travel.
     ...
     """
     out = frame.copy()
 
-    # Static projected path.
+    # The sample the displayed frame belongs to.  Computed BEFORE the path is
+    # drawn, because the path is now a window around it rather than the whole
+    # record.
+    if dot_idx is None:
+        idx = _index_for_video_time(swing.t, t_video, fps, scale, offset)
+    else:
+        idx = int(dot_idx)
+    idx = int(np.clip(idx, 0, len(swing.tip) - 1))
+
+    # Projected path — a trail around the current sample, not the whole record.
     if show_path:
-        curve = _drawable(project_path(cam, swing.tip))
-        pts = curve.astype(np.int32)[:, None, :]
-        cv2.polylines(out, [pts], isClosed=False, color=path_color,
-                      thickness=2, lineType=cv2.LINE_AA)
+        lo, hi = (path_window_idx if path_window_idx is not None
+                  else path_window(len(swing.tip), idx))
+        lo = max(0, int(lo))
+        hi = min(len(swing.tip) - 1, int(hi))
+        if hi > lo:
+            curve = _drawable(project_path(cam, swing.tip[lo:hi + 1]))
+            pts = curve.astype(np.int32)
+            nseg = len(pts) - 1
+            for k in range(nseg):
+                if path_fade:
+                    # Oldest end dim and thin, newest end bright and thick, so
+                    # the stroke reads as a direction of travel rather than a
+                    # static shape.
+                    w = (k + 1) / nseg
+                    col = tuple(int(round(c * (0.30 + 0.70 * w)))
+                                for c in path_color)
+                    thick = 1 + int(round(2 * w))
+                else:
+                    col, thick = path_color, 2
+                cv2.line(out, tuple(pts[k]), tuple(pts[k + 1]), col,
+                         thick, lineType=cv2.LINE_AA)
 
     # Impact marker (always at its true projected location).
     if show_impact and 0 <= swing.impact_idx < len(swing.tip):
@@ -506,10 +566,6 @@ def draw_overlay(
 
     # Animated dot at the current video time.
     if show_dot:
-        if dot_idx is None:
-            idx = _index_for_video_time(swing.t, t_video, fps, scale, offset)
-        else:
-            idx = int(dot_idx)
         dot = _drawable(project_points(cam, swing.tip[idx])).ravel()
         cv2.circle(out, tuple(int(round(v)) for v in dot), 7, dot_color, -1)
         cv2.circle(out, tuple(int(round(v)) for v in dot), 12, (255, 255, 255), 2)

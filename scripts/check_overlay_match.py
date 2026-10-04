@@ -13,6 +13,9 @@ Prints, and asserts where it can:
 6. honest limits — the recovered camera distance beside an independent
    estimate from the player's pixel height, and the annotated wrist-pixel
    spread, which is the error floor the pivot model cannot go below.
+   §8(c) no longer claims the arc mismatch proves no pose can work — that
+   was a time-base error (`config.SLOWMO_SCALE`), not a reconstruction one;
+   see FUSION_NOTES.md.
 
 Exit code is non-zero only on a **hard** failure: solver failure, missing
 annotations, a contact pixel that no longer matches the video, or a median
@@ -45,6 +48,8 @@ BASELINE_SLACK_PX = 10.0
 CONTACT_TOLERANCE_PX = 2.0
 # The pre-fix projected path, for criterion 2.
 OLD_PATH_EXTENT_PX = (136.0, 93.0)
+PR7_PATH_EXTENT_PX = (483.0, 373.0)   # extent before the time-base fix
+OBSERVED_EXTENT_PX = (558.0, 305.0)   # the annotations' own extent
 
 
 def _rule(title: str) -> None:
@@ -159,7 +164,7 @@ def check_fov_sweep(corr, width: int, height: int) -> camera.PoseSolution:
     return best
 
 
-def check_pose(corr, sol: camera.PoseSolution, width: int, height: int) -> None:
+def check_pose(corr, sol: camera.PoseSolution, width: int, height: int, sync) -> None:
     _rule("4. Solved pose and reprojection residuals")
     if not sol.ok:
         print("  FAIL: no usable pose")
@@ -242,11 +247,26 @@ def check_pose(corr, sol: camera.PoseSolution, width: int, height: int) -> None:
           f"span {pu.max() - pu.min():6.1f} px")
     print(f"  projected path v : {pv.min():8.1f} .. {pv.max():8.1f}   "
           f"span {pv.max() - pv.min():6.1f} px")
-    print(f"  observed annotation extent : "
-          f"{np.ptp(corr.img_pts[:, 0]):.0f} x "
-          f"{np.ptp(corr.img_pts[:, 1]):.0f} px")
-    print(f"  pre-fix projected extent   : {OLD_PATH_EXTENT_PX[0]:.0f} x "
-          f"{OLD_PATH_EXTENT_PX[1]:.0f} px")
+
+    a = overlay_calib.model_vs_video_arc(swing, sync)
+    lo, hi = a["window_lo"], a["window_hi"]
+    win = curve[lo:hi + 1]
+    wfin = np.isfinite(win).all(axis=1)
+    print(f"  over the annotated window (samples {lo}-{hi}, "
+          f"{a['window_n']} of {len(curve)}) : "
+          f"{np.ptp(win[wfin, 0]):.0f} x {np.ptp(win[wfin, 1]):.0f} px")
+    print(f"  observed annotation extent                        : "
+          f"{OBSERVED_EXTENT_PX[0]:.0f} x {OBSERVED_EXTENT_PX[1]:.0f} px")
+    print(f"  over ALL {len(curve)} samples (NOT what is drawn)       : "
+          f"{pu.max() - pu.min():.0f} x {pv.max() - pv.min():.0f} px")
+    print(f"  before the time-base fix (PR #7)                  : "
+          f"{PR7_PATH_EXTENT_PX[0]:.0f} x {PR7_PATH_EXTENT_PX[1]:.0f} px")
+    print(f"  before the overlay-flip fix (PR #6)               : "
+          f"{OLD_PATH_EXTENT_PX[0]:.0f} x {OLD_PATH_EXTENT_PX[1]:.0f} px")
+    print("  The WINDOWED extent is the comparable one: `draw_overlay` now "
+          "draws a trail\n  around the displayed frame, not the whole record. "
+          "The all-samples figure is\n  kept visible because it is what the "
+          "old static polyline put on screen.")
     return ord_v, ord_u
 
 
@@ -321,26 +341,47 @@ def check_limits(corr, sol: camera.PoseSolution, width: int, height: int,
           "so this\n      motion is absent from `tip` and no rigid pose can "
           "put it back.")
 
-    print("\n  (c) Arc-length mismatch — the decisive one")
+    print("\n  (c) Arc-length and turning, over the window the time base gives")
     a = overlay_calib.model_vs_video_arc(swing, sync)
-    print(f"      image scale (racket, no PnP)  : {a['px_per_m']:.0f} px/m")
+    print(f"      SLOWMO_SCALE                  : {a['slowmo_scale']:.2f}x "
+          f"({config.CAPTURE_FPS:g} fps capture / {config.PLAYBACK_FPS:g} fps "
+          "playback)")
+    print(f"      window                        : frames "
+          f"{a['window_frames'][0]}-{a['window_frames'][1]} = IMU samples "
+          f"{a['window_lo']}-{a['window_hi']} ({a['window_n']} of "
+          f"{len(swing.tip)})")
+    print(f"      image scale (racket, no PnP)  : {a['px_per_m']:.0f} px/m "
+          "(the ball's own diameter gives 359 px/m — see "
+          "scripts/measure_capture_fps.py)")
     print(f"      3D `tip` arc over the window  : {a['arc3d_m']:.2f} m "
           f"-> {a['arc3d_expected_px']:.0f} px of image arc")
     print(f"      racket head's observed arc    : "
           f"{a['arc2d_observed_px']:.0f} px")
-    print(f"      ratio                         : {a['ratio']:.2f}x")
-    print(f"      net turn of the racket, 3D    : {a['turn3d_net_deg']:.0f} deg "
-          f"(total path turn {a['turn3d_total_deg']:.0f} deg)")
-    print(f"      net turn of the racket, imaged: {a['turn2d_net_deg']:.0f} deg")
-    print("      A rigid pose is, to first order, a similarity on the image "
-          "plane: it can\n      translate, rotate and scale the path but "
-          "CANNOT change how much arc it\n      contains. The reconstructed "
-          "tip travels ~2x the arc the racket visibly\n      travels, with "
-          "reversals the footage does not show, so the projected path\n"
-          "      is a double loop where the video shows one sweep. That is a "
-          "reconstruction\n      property, not a calibration one — "
-          "`src/fusion.py` and `swing.npz` are out of\n      scope here, so it "
-          "is reported, not fixed.")
+    print(f"      ratio                         : {a['ratio']:.2f}x   "
+          f"(expected {a['ratio_expected']:.2f} for a correct wrist-pinned "
+          "pivot model; NOT 1.0)")
+    print(f"      total turning, 3D tangent     : "
+          f"{a['turn3d_tangent_deg']:.0f} deg over the window")
+    print(f"      total turning, 3D at the 13 annotated frames : "
+          f"{a['turn3d_tangent_at_frames_deg']:.0f} deg")
+    print(f"      total turning, 2D observed at the same frames: "
+          f"{a['turn2d_tangent_observed_deg']:.0f} deg")
+    print(f"      (arc / RACKET_TIP_LEN, the old mis-named "
+          f"'turn3d_total_deg') : {a['arc_over_L_deg']:.0f} deg — this is the "
+          "arc in radius\n       units, it moves in lockstep with the arc and "
+          "evidences nothing on its own.")
+    print("      The 2.01x this used to report was a TIME-BASE error, not a "
+          "reconstruction\n      one: `SLOWMO_SCALE` was 1.0, so 0.96 s of IMU "
+          "motion (samples 0-398) was\n      compared against 0.12 s of real "
+          "video time. The ratio is algebraically a\n      function of "
+          "FS/fps_capture only - `RACKET_TIP_LEN` cancels exactly - so no\n"
+          "      change inside `src/fusion.py` could have moved it. "
+          "See FUSION_NOTES.md.")
+    print(f"      Remaining gap {a['ratio']:.2f} vs {a['ratio_expected']:.2f}: "
+          "the wrist translation `pivot_tip` omits\n      "
+          f"({smax:.0f} px annotated), the post-impact excursion-and-return of "
+          "analysis\n      §4.5, and the 13-point polyline's own undercount of "
+          "`arc2d`.")
 
     # Impact residual, reported on its own because criterion 4 depends on it.
     k = int(np.argmin(np.abs(corr.frames - overlay_calib.CONTACT_FRAME_EXACT)))
@@ -400,7 +441,7 @@ def main() -> int:
 
     swept = check_fov_sweep(corr, width, height)
     sol = overlay_calib.solved_pose(width, height, overlay_calib.CALIB_FOV_DEG)
-    ord_v, ord_u = check_pose(corr, sol, width, height)
+    ord_v, ord_u = check_pose(corr, sol, width, height, sync)
     if not sol.ok:
         return 1
     check_loo(corr, width, height, sol.fov_deg)

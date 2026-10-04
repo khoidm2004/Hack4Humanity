@@ -162,12 +162,13 @@ PLAYER_HEIGHT_M = 1.75
 # the player.  Nothing here was moved to flatter the error.
 CALIB_FOV_DEG = 60.0
 
-# The median reprojection error actually achieved at CALIB_FOV_DEG, recorded
-# so the tester has a real regression gate.  This is the MEASURED value, not
-# the acceptance target (which is 50 px, reported separately) — see
-# `scripts/check_overlay_match.py`.  The target is NOT met; section 8 of that
-# script carries the evidence for why no rigid pose can meet it.
-RECORDED_BASELINE_PX = 56.0
+# The median reprojection error actually achieved at CALIB_FOV_DEG, recorded so
+# the tester has a real regression gate (one-sided: it fails on worse, never on
+# better).  Was 56.0 px, measured against the pre-time-base-fix reconstruction;
+# the pose is re-solved from the annotations on every run, so after
+# SLOWMO_SCALE went 1.0 -> 8.0 the same fit lands at the value below.  This is a
+# MEASUREMENT tightened to match reality, not a target moved to pass a check.
+RECORDED_BASELINE_PX = 21.5
 
 # Two image-side measurements used as independent cross-checks on the pose.
 # `max |head_px - wrist_px|` over the annotated frames is the racket seen
@@ -314,6 +315,15 @@ def racket_pixel_scale() -> tuple[float, float]:
     over the annotated frames is the racket seen closest to fronto-parallel,
     so dividing by ``config.RACKET_TIP_LEN`` gives an image scale that owes
     nothing to PnP, the fusion output, or the FOV assumption.
+
+    Known 20 % low, reported not fixed: the tennis ball's own pixel diameter
+    (24.0 px / 0.067 m = 359 px/m, `scripts/measure_capture_fps.py`) disagrees
+    with this function's 285 px/m by exactly the ratio 0.686/0.544 — i.e. the
+    open question of what the wrist->head-rim lever really is (analysis §2.5,
+    §7 Q4).  It MUST keep dividing by `config.RACKET_TIP_LEN`, the same length
+    `fusion.pivot_tip` uses: the `L` then cancels out of
+    `model_vs_video_arc`'s `ratio` exactly (analysis §3.1), and changing only
+    one of the two would silently break that cancellation.
     """
     frames = sorted(set(RACKET_HEAD_PX_ANGLE_1) & set(WRIST_PX_ANGLE_1))
     v = np.array([np.subtract(RACKET_HEAD_PX_ANGLE_1[f], WRIST_PX_ANGLE_1[f])
@@ -329,6 +339,27 @@ def racket_distance_m(fov_deg: float = CALIB_FOV_DEG, width: int = 1280) -> floa
     return float(fx / scale)
 
 
+def tangent_turning_deg(path: np.ndarray) -> float:
+    """Total turning along a polyline: the sum of angles between successive
+    tangent directions, in degrees.
+
+    This is what "total turning" means and what reversals and loops show up in.
+    `model_vs_video_arc` used to report `arc / RACKET_TIP_LEN` under the name
+    `turn3d_total_deg`, which is arc divided by radius — it moves in exact
+    lockstep with the arc and carries no information beyond it.  Works for
+    (N,2) pixel paths and (N,3) metre paths alike.
+    """
+    p = np.asarray(path, float)
+    d = np.diff(p, axis=0)
+    n = np.linalg.norm(d, axis=1)
+    keep = n > 1e-12
+    if keep.sum() < 2:
+        return 0.0
+    u = d[keep] / n[keep, None]
+    c = np.clip(np.einsum("ij,ij->i", u[:-1], u[1:]), -1.0, 1.0)
+    return float(np.rad2deg(np.arccos(c)).sum())
+
+
 def model_vs_video_arc(swing, sync) -> dict:
     """How far the reconstructed tip travels, against how far the racket does.
 
@@ -338,10 +369,15 @@ def model_vs_video_arc(swing, sync) -> dict:
     the path contains.  If the two arc lengths disagree, no pose fits, and the
     reprojection error has a floor that is nothing to do with the camera.
 
+    The window is now the one the RESCALED time base gives (see
+    `config.SLOWMO_SCALE`), not the whole 400-sample record: with
+    `SLOWMO_SCALE = 1.0` this used to span samples 0-398 of 400 — 0.96 s of
+    IMU motion compared against 0.12 s of real video time.
+
     Returns the 3D arc in metres, the image arc it should produce at the
     independently measured pixel scale, the arc the annotated racket head
-    actually traces, and their ratio.  Also returns the net turn of the
-    racket vector, measured both ways.
+    actually traces, their ratio, real tangent turning three ways, and the
+    window the comparison spans.
     """
     frames = sorted(RACKET_HEAD_PX_ANGLE_1)
     lo = sync.imu_idx_for_frame_centered(frames[0])
@@ -360,13 +396,36 @@ def model_vs_video_arc(swing, sync) -> dict:
 
     v = np.array([np.subtract(RACKET_HEAD_PX_ANGLE_1[f], WRIST_PX_ANGLE_1[f])
                   for f in frames], float)
+    wrist_max_px = wrist_pixel_spread()[2]
     return {
         "arc3d_m": arc3d,
         "arc3d_expected_px": arc3d * scale,
         "arc2d_observed_px": arc2d,
         "ratio": arc3d * scale / arc2d,
-        "turn3d_total_deg": float(np.rad2deg(arc3d / config.RACKET_TIP_LEN)),
+        # What a CORRECT wrist-pinned pivot model should give: `pivot_tip` holds
+        # the wrist at the origin, so it can only produce the rotational part of
+        # the head's motion, and the repo has measured `wrist_max_px` of wrist
+        # travel it cannot represent. 1.0 is unreachable by construction.
+        "ratio_expected": (arc2d - wrist_max_px) / arc2d,
+        # `arc / RACKET_TIP_LEN`, kept for continuity with OVERLAY_FRAME.md and
+        # renamed because it is NOT a turning measurement: it is the arc in
+        # radius units and moves in exact lockstep with the arc.
+        "arc_over_L_deg": float(np.rad2deg(arc3d / config.RACKET_TIP_LEN)),
+        # Real total turning, three ways, all directly comparable.
+        "turn3d_tangent_deg": tangent_turning_deg(tip),
+        "turn3d_tangent_at_frames_deg": tangent_turning_deg(
+            np.array([swing.tip[sync.imu_idx_for_frame_centered(f)]
+                      for f in frames], float)),
+        "turn2d_tangent_observed_deg": tangent_turning_deg(px),
         "turn3d_net_deg": _ang(tip[0], tip[-1]),
         "turn2d_net_deg": _ang(v[0], v[-1]),
         "px_per_m": scale,
+        # The window the comparison actually spans — the evidence the time base
+        # is right.  With SLOWMO_SCALE = 1.0 this was samples 0-398 of 400:
+        # 0.96 s of IMU motion against 0.12 s of real video time.
+        "window_lo": int(lo),
+        "window_hi": int(hi),
+        "window_n": int(hi - lo + 1),
+        "window_frames": (int(frames[0]), int(frames[-1])),
+        "slowmo_scale": float(config.SLOWMO_SCALE),
     }

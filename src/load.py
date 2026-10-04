@@ -74,11 +74,26 @@ def load_csv(path: str | None = None) -> pd.DataFrame:
 def to_signal_arrays(df: pd.DataFrame) -> tuple[np.ndarray, np.ndarray]:
     """Extract the accelerometer and gyroscope arrays from a loaded frame.
 
+    The CSV's accelerometer columns are in **g** (`config.ACCEL_UNITS`): `ax`
+    hard-clips at 15.961504 for samples 181-199, the +/-16 g full scale of the
+    part.  Every consumer's docstring says m/s2, so the conversion happens
+    here, once, at the boundary.  Nothing used to convert, which made
+    `fusion.rest_to_rest_cog` double-integrate numbers 9.80665x too small
+    (`cog` span 0.161 m instead of 1.63 m) and made `metrics.peak_gforce`
+    divide g by g.  `data/raw_data.csv` is NOT modified.
+
+    This does not change `tip` or `quat`: `fusion.estimate_gravity` normalises
+    its result to `config.G` regardless of the input scale, and the
+    complementary-filter branch that would see the magnitude is off
+    (`COMP_FILTER_ALPHA = 0.0`).  Verified: max |tip| difference 4.4e-16 m.
+
     Returns
     -------
     accel : (N, 3) float array, accelerometer in m/s2
     gyro  : (N, 3) float array, gyroscope in deg/s
     """
     accel = df[ACCEL_COLS].to_numpy(dtype=float)
+    if config.ACCEL_UNITS == "g":
+        accel = accel * config.G
     gyro = df[GYRO_COLS].to_numpy(dtype=float)
     return accel, gyro
