@@ -80,21 +80,38 @@ def get_impact_pixel(video_path: str) -> tuple[float, float] | None:
 
 def render_overlay_controls(swing):
     """Sidebar controls for the overlay (camera, align, layers)."""
-    from src import camera  # noqa: PLC0415
+    from src import overlay_calib  # noqa: PLC0415
 
     with st.sidebar:
         st.subheader("🔧 Align & Overlay")
 
-        fov = st.slider("Camera FOV (deg)", 40.0, 100.0, 60.0, 1.0,
-                        help="Intrinsics assumption; refine until the path "
-                             "lands on the racket.")
+        fov = st.slider("Camera FOV (deg)", 40.0, 100.0,
+                        overlay_calib.CALIB_FOV_DEG, 1.0,
+                        help="Intrinsics assumption. The default is the value "
+                             "the pose was solved at; the reprojection error "
+                             "barely moves across this whole range, so the "
+                             "footage does not pin it down (see "
+                             "scripts/check_overlay_match.py).")
 
-        st.markdown("**Slider nudge** (fallback alignment)")
-        yaw = st.slider("yaw", -20.0, 20.0, 0.0, 0.5)
+        st.markdown("**Slider nudge** (adjustment on top of the solved pose)")
+        yaw = st.slider("yaw", -20.0, 20.0, 0.0, 0.5,
+                        help="Rotates the camera about its own centre, which "
+                             "now sits ~3 m from the swing rather than the old "
+                             "fabricated 10 m — so a few degrees moves the "
+                             "path much further than it used to.")
         elev = st.slider("elevation", -20.0, 20.0, 0.0, 0.5)
         zoom = st.slider("zoom", 0.5, 2.0, 1.0, 0.01)
         pan_x = st.slider("pan x", -80.0, 80.0, 0.0, 2.0)
         pan_y = st.slider("pan y", -80.0, 80.0, 0.0, 2.0)
+
+        anchor_impact = st.checkbox(
+            "anchor impact to ball pixel (legacy)", value=False,
+            help="Pre-calibration behaviour: slide the whole path until the "
+                 "projected impact point lands on the detected ball-contact "
+                 "pixel. With a pose fitted to 14 correspondences this moves "
+                 "every other frame by that one point's residual, so it is "
+                 "off by default. Turning it on also costs a full video "
+                 "decode on first render.")
 
         st.markdown("**Rough time sync**")
         scale = st.number_input("slow-mo scale", 1.0, 12.0,
@@ -107,41 +124,64 @@ def render_overlay_controls(swing):
 
         return dict(
             fov=fov, yaw=yaw, elev=elev, zoom=zoom, pan_x=pan_x, pan_y=pan_y,
-            scale=scale, offset=offset,
+            scale=scale, offset=offset, anchor_impact=anchor_impact,
             show_path=show_path, show_dot=show_dot, show_impact=show_impact,
         )
 
 
-def build_overlay_camera(meta, opts, swing=None, impact_pixel=None):
-    """Build an approximate view and anchor the impact point to the ball.
+# Legacy pose, used only for clips with no committed calibration.  It is a
+# basis conversion plus a guess at the distance, not a calibration — see
+# OVERLAY_FRAME.md.
+LEGACY_RVEC = (1.5707963267948966, 0.0, 0.0)   # [+pi/2, 0, 0]
+LEGACY_TVEC = (0.0, 0.0, 10.0)
 
-    A single 2D point anchors translation only; yaw/elevation/zoom are still
-    approximate and remain adjustable in the sidebar.
+
+def build_overlay_camera(meta, opts, swing=None, impact_pixel=None,
+                         video_name=None):
+    """Build the projection camera for one clip.
+
+    For ``swing_angle_1.mp4`` the rotation and translation come from
+    ``src.overlay_calib.solved_pose`` — a ``solvePnP`` fit to the committed
+    racket-head annotations, recomputed here (memoised, microseconds) rather
+    than baked in as constants, so the app and
+    ``scripts/check_overlay_match.py`` can never disagree.  The Z-up world ->
+    Y-down camera conversion that ``OVERLAY_FRAME.md`` describes still applies;
+    it is now absorbed into the solved rotation instead of being written out.
+
+    Any other clip falls back to the old guessed pose and says so.  The
+    intrinsics always come from the FOV slider, so that slider still visibly
+    changes the projection; its default is the FOV the pose was solved at.
     """
-    from src import camera
+    from src import camera, overlay_calib
     import numpy as _np
+
     K = camera.estimate_intrinsics(meta.width, meta.height, opts["fov"])
-    # Fusion's world frame is Z-up (src/fusion.py:125 aligns gravity to
-    # [0,0,-1], so world "up" is +Z); OpenCV's camera frame is Y-down,
-    # Z-forward (+X right, +Y down the image, +Z into the screen). Feeding
-    # Z-up world straight into the Y-down camera with an identity rotation
-    # loses vertical motion entirely (world +Z becomes depth, invisible) and
-    # drives screen vertical off world +Y instead — the "upside down" path
-    # bug (see OVERLAY_FRAME.md). A +90 deg rotation about the camera X axis
-    # maps world +Z -> camera -Y (up on screen) and world +Y -> camera +Z
-    # (depth), which is what's needed here. Verified empirically (not
-    # assumed): +pi/2 gives corr(+Z, screen_v) = -0.999, corr(+Y, screen_v)
-    # = +0.044; the opposite sign -pi/2 gives corr(+Z, screen_v) = +0.999,
-    # i.e. still upside down. Do not reintroduce the identity rvec.
-    cam = camera.Camera.from_pnps(
-        K, _np.zeros(5),
-        _np.array([_np.pi / 2.0, 0.0, 0.0]), _np.array([0.0, 0.0, 10.0]),
-        meta.width, meta.height,
-    )
+    rvec, tvec = _np.array(LEGACY_RVEC), _np.array(LEGACY_TVEC)
+
+    if video_name is not None and overlay_calib.has_annotations(video_name):
+        try:
+            sol = overlay_calib.solved_pose(meta.width, meta.height,
+                                            float(opts["fov"]))
+        except Exception as exc:                       # noqa: BLE001
+            st.warning(f"⚠️ Pose solve failed for `{video_name}` ({exc}); "
+                       "falling back to the uncalibrated guess.")
+        else:
+            if sol.ok:
+                rvec, tvec = sol.rvec, sol.tvec
+            else:
+                st.warning(f"⚠️ No valid pose for `{video_name}`: "
+                           f"{'; '.join(sol.messages) or 'solver failed'}. "
+                           "Falling back to the uncalibrated guess.")
+    elif video_name is not None:
+        st.info(f"ℹ️ No camera calibration exists for `{video_name}` — the "
+                "overlay pose is a guess, not a fit. Use the sliders.")
+
+    cam = camera.Camera.from_pnps(K, _np.zeros(5), rvec, tvec,
+                                  meta.width, meta.height)
     cam = camera.nudge(cam, yaw=opts["yaw"], elev=opts["elev"],
                        zoom=opts["zoom"])
     pan_x, pan_y = opts["pan_x"], opts["pan_y"]
-    if swing is not None and impact_pixel is not None:
+    if opts.get("anchor_impact") and swing is not None and impact_pixel is not None:
         projected = camera.project_points(cam, swing.tip[swing.impact_idx])[0]
         pan_x += float(impact_pixel[0] - projected[0])
         pan_y += float(impact_pixel[1] - projected[1])
@@ -177,8 +217,13 @@ def main():
             meta = dict(videos)[sel]
             sync_table = synced.get(sel)
             syncable = bool(sync_table is not None and sync_table.syncable)
-            impact_pixel = get_impact_pixel(meta.path) if syncable else None
-            cam = build_overlay_camera(meta, opts, swing, impact_pixel)
+            # Only decode the whole video for the ball detector when the
+            # legacy one-point anchor is actually switched on — that decode is
+            # the ~60 s first render.
+            impact_pixel = (get_impact_pixel(meta.path)
+                            if syncable and opts["anchor_impact"] else None)
+            cam = build_overlay_camera(meta, opts, swing, impact_pixel,
+                                       video_name=sel)
 
             # ---- Mode C fallback: side-by-side (video | 3D) ---- #
             side_by_side = st.checkbox(
@@ -301,7 +346,11 @@ def _player(meta, cam, swing, opts, metrics, sync_table=None):
     img = get_frame(meta.path, int(idx))
 
     if sync_table is not None and sync_table.syncable:
-        dot_idx = sync_table.imu_idx_for_frame(int(idx))
+        # Centred, not `imu_idx_for_frame`: that one argmins over the rounded
+        # frame index and so returns the FIRST sample of the frame's bin, half
+        # a frame (~7 IMU samples) early. Near impact the tip moves ~0.45 m
+        # inside one bin, so the dot was landing noticeably behind the racket.
+        dot_idx = sync_table.imu_idx_for_frame_centered(int(idx))
         scale, offset = 1.0, 0.0   # unused when dot_idx is passed
     else:
         dot_idx = None

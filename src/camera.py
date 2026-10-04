@@ -119,6 +119,258 @@ def calibrate(
 
 
 # --------------------------------------------------------------------------- #
+# Robust pose recovery from many 2D<->3D correspondences
+# --------------------------------------------------------------------------- #
+@dataclass
+class PoseSolution:
+    """A solved camera pose plus the diagnostics needed to judge it.
+
+    ``calibrate`` above answers "give me a pose"; this answers "give me a pose
+    *and* tell me how badly it fits", which is what a many-point fit to noisy
+    hand annotations actually needs.  Nothing here silently discards a point:
+    ``inliers`` records what RANSAC kept, ``residuals`` is reported for every
+    input point, and ``messages`` carries every validation failure.
+    """
+
+    ok: bool
+    rvec: np.ndarray
+    tvec: np.ndarray
+    K: np.ndarray
+    fov_deg: float
+    solver: str
+    residuals: np.ndarray        # (M,) per-point reprojection error, px
+    inliers: np.ndarray          # (M,) bool — RANSAC inlier mask
+    messages: tuple[str, ...] = ()
+
+    @property
+    def median_px(self) -> float:
+        return float(np.median(self.residuals)) if len(self.residuals) else float("nan")
+
+    @property
+    def mean_px(self) -> float:
+        return float(np.mean(self.residuals)) if len(self.residuals) else float("nan")
+
+    @property
+    def max_px(self) -> float:
+        return float(np.max(self.residuals)) if len(self.residuals) else float("nan")
+
+    @property
+    def camera_distance_m(self) -> float:
+        """Distance from the camera centre to the world origin (the wrist)."""
+        return float(np.linalg.norm(self.tvec))
+
+    def camera(self, width: int, height: int) -> Camera:
+        return Camera.from_pnps(self.K, np.zeros(5), self.rvec, self.tvec,
+                                width, height)
+
+
+def _reproject_errors(obj: np.ndarray, img: np.ndarray, K: np.ndarray,
+                      rvec: np.ndarray, tvec: np.ndarray) -> np.ndarray:
+    proj, _ = cv2.projectPoints(obj.astype(np.float32), rvec, tvec, K, None)
+    return np.linalg.norm(proj.reshape(-1, 2) - img, axis=1)
+
+
+def _in_front(obj: np.ndarray, rvec: np.ndarray, tvec: np.ndarray) -> np.ndarray:
+    """Camera-frame depth of each world point (must be > 0 for a valid pose)."""
+    R = cv2.Rodrigues(np.asarray(rvec, float).reshape(3))[0]
+    return (R @ obj.T).T[:, 2] + float(np.asarray(tvec).reshape(3)[2])
+
+
+def _order_correlations(obj: np.ndarray, img: np.ndarray, K: np.ndarray,
+                        rvec: np.ndarray, tvec: np.ndarray) -> tuple[float, float]:
+    """``(corr_u, corr_v)`` between projected and observed pixel coordinates.
+
+    A pose can hit a low median residual while running the path *backwards* —
+    typically when a robust fit has latched onto one half of the data and
+    mirrored the rest.  Requiring the projection to preserve the observed
+    left-right and up-down ordering rejects those, and unlike a fixed
+    world-axis sign rule it assumes nothing about which way the world frame's
+    axes point: it compares the projection with the annotations themselves.
+    """
+    proj, _ = cv2.projectPoints(obj.astype(np.float32), rvec, tvec, K, None)
+    proj = proj.reshape(-1, 2)
+    out = []
+    for k in (0, 1):
+        a, b = proj[:, k], img[:, k]
+        if not np.all(np.isfinite(a)) or a.std() < 1e-9 or b.std() < 1e-9:
+            out.append(float("nan"))
+        else:
+            out.append(float(np.corrcoef(a, b)[0, 1]))
+    return out[0], out[1]
+
+
+def solve_pose(
+    width: int,
+    height: int,
+    img_pts: np.ndarray,
+    obj_pts: np.ndarray,
+    fov_deg: float = 60.0,
+    *,
+    ransac_reproj_px: float = 40.0,
+    iterations: int = 5000,
+    confidence: float = 0.999,
+    require_order: bool = True,
+    use_ransac: bool = True,
+) -> PoseSolution:
+    """Recover a camera pose from >=4 noisy 2D<->3D matches.
+
+    Runs three solvers and keeps the one with the lowest median residual
+    rather than trusting any single one:
+
+    * ``solvePnPRansac`` (SQPNP) followed by ``solvePnPRefineLM`` on its
+      inliers — robust to one bad annotation;
+    * plain ``solvePnP`` with ``SOLVEPNP_SQPNP``;
+    * plain ``solvePnP`` with ``SOLVEPNP_ITERATIVE``.
+
+    The focal length is **not** solved jointly (hopelessly ill-conditioned on
+    ~12 noisy points); ``fov_deg`` fixes the intrinsics and
+    :func:`solve_pose_fov_sweep` scans it instead.
+
+    Two validity tests reject a pose outright rather than reporting it:
+    any correspondence behind the camera, and (when ``require_order``, and
+    there are at least 5 points) a projection that reverses the observed
+    left-right or up-down ordering of the annotations.
+    """
+    img = np.ascontiguousarray(np.asarray(img_pts, float).reshape(-1, 2))
+    obj = np.ascontiguousarray(np.asarray(obj_pts, float).reshape(-1, 3))
+    if len(img) != len(obj):
+        raise ValueError(f"{len(img)} image points vs {len(obj)} object points")
+    if len(img) < 4:
+        raise ValueError("solve_pose needs at least 4 point matches")
+
+    K = estimate_intrinsics(width, height, fov_deg)
+    obj_f = obj.astype(np.float32)
+    img_f = img.astype(np.float32)
+    msgs: list[str] = []
+    cands: list[tuple[float, str, np.ndarray, np.ndarray, np.ndarray]] = []
+
+    # ---- RANSAC + LM refinement ---- #
+    # `use_ransac=False` leaves only the all-point fits, which is how the FOV
+    # sweep gets an objective that is continuous in the FOV: a robust fit can
+    # change WHICH points it explains from one FOV to the next, so its median
+    # jumps around and its argmin says nothing about the lens.
+    inlier_mask = np.ones(len(img), bool)
+    try:
+        res = cv2.solvePnPRansac(
+            obj_f, img_f, K, None,
+            reprojectionError=float(ransac_reproj_px),
+            iterationsCount=int(iterations), confidence=float(confidence),
+            flags=cv2.SOLVEPNP_SQPNP,
+        ) if use_ransac else None
+    except cv2.error as exc:                                    # pragma: no cover
+        res = None
+        msgs.append(f"solvePnPRansac raised: {exc}")
+    if res is not None:
+        # OpenCV 5 returns (retval, rvec, tvec, inliers); `inliers` is None
+        # when RANSAC never had to reject anything.
+        retval, rvec, tvec = res[0], res[1], res[2]
+        inl = res[3] if len(res) > 3 else None
+        if retval and rvec is not None and tvec is not None:
+            mask = np.ones(len(img), bool)
+            if inl is not None and len(np.asarray(inl).ravel()) > 0:
+                mask = np.zeros(len(img), bool)
+                mask[np.asarray(inl).ravel().astype(int)] = True
+            if mask.sum() < 4:
+                msgs.append(f"RANSAC kept only {int(mask.sum())} inliers; "
+                            "refining on all points instead")
+                mask = np.ones(len(img), bool)
+            inlier_mask = mask
+            try:
+                rvec, tvec = cv2.solvePnPRefineLM(
+                    obj_f[mask], img_f[mask], K, None,
+                    np.asarray(rvec, float), np.asarray(tvec, float))
+            except cv2.error as exc:                            # pragma: no cover
+                msgs.append(f"solvePnPRefineLM raised: {exc}")
+            err = _reproject_errors(obj, img, K, rvec, tvec)
+            cands.append((float(np.median(err)), "ransac+lm",
+                          np.asarray(rvec, float).reshape(3),
+                          np.asarray(tvec, float).reshape(3), err))
+        else:
+            msgs.append("solvePnPRansac returned retval=False")
+
+    # ---- Plain solvers, for comparison ---- #
+    for name, flag in (("sqpnp", cv2.SOLVEPNP_SQPNP),
+                       ("iterative", cv2.SOLVEPNP_ITERATIVE)):
+        try:
+            out = cv2.solvePnP(obj_f, img_f, K, None, flags=flag)
+        except cv2.error as exc:
+            msgs.append(f"solvePnP[{name}] raised: {exc}")
+            continue
+        ret, rvec, tvec = out[0], out[1], out[2]
+        if not ret or rvec is None or tvec is None:
+            msgs.append(f"solvePnP[{name}] returned retval=False")
+            continue
+        err = _reproject_errors(obj, img, K, rvec, tvec)
+        cands.append((float(np.median(err)), name,
+                      np.asarray(rvec, float).reshape(3),
+                      np.asarray(tvec, float).reshape(3), err))
+
+    # ---- Reject poses that are geometrically invalid ---- #
+    valid = []
+    for med, name, rvec, tvec, err in cands:
+        depth = _in_front(obj, rvec, tvec)
+        if np.any(depth <= 0):
+            msgs.append(f"{name}: rejected, {int((depth <= 0).sum())} of "
+                        f"{len(obj)} points behind the camera "
+                        f"(min depth {depth.min():.3f} m)")
+            continue
+        if require_order and len(obj) >= 5:
+            cu, cv_ = _order_correlations(obj, img, K, rvec, tvec)
+            if not (cu > 0) or not (cv_ > 0):
+                msgs.append(
+                    f"{name}: rejected (median would have been {med:.1f} px), "
+                    f"projection reverses the observed order — "
+                    f"corr(proj u, obs u)={cu:+.2f}, "
+                    f"corr(proj v, obs v)={cv_:+.2f}")
+                continue
+        valid.append((med, name, rvec, tvec, err))
+
+    if not valid:
+        return PoseSolution(False, np.zeros(3), np.array([0.0, 0.0, 10.0]), K,
+                            float(fov_deg), "none", np.array([]),
+                            np.zeros(len(img), bool),
+                            tuple(msgs) or ("no solver produced a usable pose",))
+
+    valid.sort(key=lambda c: c[0])
+    med, name, rvec, tvec, err = valid[0]
+    msgs.append("solver medians: " + ", ".join(
+        f"{n}={m:.1f}px" for m, n, _r, _t, _e in valid))
+    return PoseSolution(True, rvec, tvec, K, float(fov_deg), name, err,
+                        inlier_mask, tuple(msgs))
+
+
+def solve_pose_fov_sweep(
+    width: int,
+    height: int,
+    img_pts: np.ndarray,
+    obj_pts: np.ndarray,
+    fovs: "np.ndarray | list[float] | None" = None,
+    **kwargs,
+) -> tuple[PoseSolution, list[tuple[float, float, str]]]:
+    """Re-solve at each candidate FOV and keep the lowest median residual.
+
+    Returns ``(best, table)`` where ``table`` is one
+    ``(fov_deg, median_px, solver)`` row per candidate — print it, it is the
+    evidence the FOV was *solved* rather than tuned.
+    """
+    if fovs is None:
+        fovs = np.arange(40.0, 100.0 + 1e-9, 2.5)
+    table: list[tuple[float, float, str]] = []
+    best: PoseSolution | None = None
+    for fov in np.asarray(fovs, float):
+        sol = solve_pose(width, height, img_pts, obj_pts, float(fov), **kwargs)
+        table.append((float(fov),
+                      sol.median_px if sol.ok else float("inf"),
+                      sol.solver))
+        if sol.ok and (best is None or sol.median_px < best.median_px):
+            best = sol
+    if best is None:
+        best = solve_pose(width, height, img_pts, obj_pts,
+                          float(np.asarray(fovs, float)[0]), **kwargs)
+    return best, table
+
+
+# --------------------------------------------------------------------------- #
 # Projection helpers
 # --------------------------------------------------------------------------- #
 def project_points(cam: Camera, pts3d: np.ndarray) -> np.ndarray:
@@ -182,6 +434,26 @@ def _index_for_video_time(swing_t: np.ndarray, t_video: float,
     return int(np.argmin(np.abs(swing_t - imu_t)))
 
 
+_DRAW_LIMIT = 1e5
+
+
+def _drawable(pts: np.ndarray) -> np.ndarray:
+    """Clamp projected pixels into a range ``int32`` can hold.
+
+    ``cv2.projectPoints`` happily returns +/-inf, NaN, or values in the
+    billions for a point near the camera plane, and casting those to
+    ``int32`` wraps around into garbage coordinates.  The solved pose sits
+    ~3 m from the swing so this should not happen, but the yaw/elevation
+    sliders orbit the camera about its own centre and can swing points behind
+    it.  Clamping draws a line that leaves the frame instead of one that
+    wraps back into it.
+    """
+    pts = np.asarray(pts, float)
+    pts = np.nan_to_num(pts, nan=_DRAW_LIMIT, posinf=_DRAW_LIMIT,
+                        neginf=-_DRAW_LIMIT)
+    return np.clip(pts, -_DRAW_LIMIT, _DRAW_LIMIT)
+
+
 def draw_overlay(
     frame: np.ndarray,
     cam: Camera,
@@ -220,14 +492,14 @@ def draw_overlay(
 
     # Static projected path.
     if show_path:
-        curve = project_path(cam, swing.tip)
+        curve = _drawable(project_path(cam, swing.tip))
         pts = curve.astype(np.int32)[:, None, :]
         cv2.polylines(out, [pts], isClosed=False, color=path_color,
                       thickness=2, lineType=cv2.LINE_AA)
 
     # Impact marker (always at its true projected location).
     if show_impact and 0 <= swing.impact_idx < len(swing.tip):
-        imp = project_points(cam, swing.tip[swing.impact_idx]).ravel()
+        imp = _drawable(project_points(cam, swing.tip[swing.impact_idx])).ravel()
         cv2.circle(out, tuple(int(round(v)) for v in imp), 12, impact_color, 2)
         cv2.putText(out, "IMPACT", (int(imp[0]) + 12, int(imp[1]) - 8),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.6, impact_color, 2)
@@ -238,7 +510,7 @@ def draw_overlay(
             idx = _index_for_video_time(swing.t, t_video, fps, scale, offset)
         else:
             idx = int(dot_idx)
-        dot = project_points(cam, swing.tip[idx]).ravel()
+        dot = _drawable(project_points(cam, swing.tip[idx])).ravel()
         cv2.circle(out, tuple(int(round(v)) for v in dot), 7, dot_color, -1)
         cv2.circle(out, tuple(int(round(v)) for v in dot), 12, (255, 255, 255), 2)
 
