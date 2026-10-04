@@ -121,9 +121,21 @@ def build_overlay_camera(meta, opts, swing=None, impact_pixel=None):
     from src import camera
     import numpy as _np
     K = camera.estimate_intrinsics(meta.width, meta.height, opts["fov"])
+    # Fusion's world frame is Z-up (src/fusion.py:125 aligns gravity to
+    # [0,0,-1], so world "up" is +Z); OpenCV's camera frame is Y-down,
+    # Z-forward (+X right, +Y down the image, +Z into the screen). Feeding
+    # Z-up world straight into the Y-down camera with an identity rotation
+    # loses vertical motion entirely (world +Z becomes depth, invisible) and
+    # drives screen vertical off world +Y instead — the "upside down" path
+    # bug (see OVERLAY_FRAME.md). A +90 deg rotation about the camera X axis
+    # maps world +Z -> camera -Y (up on screen) and world +Y -> camera +Z
+    # (depth), which is what's needed here. Verified empirically (not
+    # assumed): +pi/2 gives corr(+Z, screen_v) = -0.999, corr(+Y, screen_v)
+    # = +0.044; the opposite sign -pi/2 gives corr(+Z, screen_v) = +0.999,
+    # i.e. still upside down. Do not reintroduce the identity rvec.
     cam = camera.Camera.from_pnps(
         K, _np.zeros(5),
-        _np.array([0.0, 0.0, 0.0]), _np.array([0.0, 0.0, 10.0]),
+        _np.array([_np.pi / 2.0, 0.0, 0.0]), _np.array([0.0, 0.0, 10.0]),
         meta.width, meta.height,
     )
     cam = camera.nudge(cam, yaw=opts["yaw"], elev=opts["elev"],
