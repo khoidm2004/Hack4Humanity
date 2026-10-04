@@ -100,10 +100,29 @@ def integrate_orientation(accel: np.ndarray,
     except Exception:
         accel_smooth = accel
 
-    rot_accum = Rotation.from_quat(q0)
+    # `_align_to_gravity` returns the contract's (w,x,y,z) order (it reorders
+    # scipy's own output at :126), but `Rotation.from_quat` reads (x,y,z,w).
+    # Feeding it the (w,x,y,z) array scrambled the initial orientation: the
+    # intended R0 maps g_sensor onto [0,0,-1], the scrambled one mapped it onto
+    # [-0.075, 0.179, 0.981] — 171.8 deg out.  scipy renormalises, so there was
+    # no error to notice.  Reorder back to scipy's convention here.
+    #
+    # Because the loop below right-multiplies (`rot_accum * dq`), R(t) =
+    # R0 . dR(t) and q0 is a pure LEFT multiplication: fixing it rotates the
+    # whole path rigidly and changes `tip`'s arc length and tangent turning by
+    # exactly zero (measured: both identical to 15 significant figures; max
+    # |tip| difference 1.269 m, a constant 171.8 deg rotation).  It is a real
+    # defect and is fixed on its own merits, not to move the arc — the arc is
+    # a time-base problem, see FUSION_NOTES.md.
+    rot_accum = Rotation.from_quat(q0[[1, 2, 3, 0]])
     for i in range(len(gyro_deg)):
         dq = Rotation.from_rotvec(omega[i])
-        rot_accum = rot_accum * dq  # increments in world frame
+        rot_accum = rot_accum * dq  # right-multiply: increments in the BODY
+        # frame, which is correct for a body-mounted gyro.  The old comment
+        # said "world frame", which is what left-multiplication would do;
+        # composing that way measures 5.752 m / 871 deg against the body
+        # frame's 5.113 m / 806 deg, i.e. the comment described the worse
+        # option.  Code was right, comment was wrong.
 
         if alpha > 0.0:
             # Measured gravity direction in world frame = R @ g_sensor.

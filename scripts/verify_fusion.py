@@ -37,10 +37,29 @@ def run_checks(accel, gyro, swing) -> list[str]:
     # ---- Signal integrity ------------------------------------------------ #
     check("no NaN/Inf in accel", not (np.isnan(accel).any() or np.isinf(accel).any()))
     check("no NaN/Inf in gyro", not (np.isnan(gyro).any() or np.isinf(gyro).any()))
+    # The old bound was "0 < |a| < 40 m/s2".  It passed only because the CSV is
+    # in g while `config.ACCEL_UNITS` claimed m/s2 and nothing converted: the
+    # numbers it saw peaked at 20.9 when the real peak is 205 m/s2.  Now that
+    # `load.to_signal_arrays` converts, 40 m/s2 would fail — and it SHOULD,
+    # because 40 m/s2 (4 g) was never a defensible bound for a racket strike.
+    # The honest bound is the sensor's own range: no axis may exceed its
+    # +/-16 g full scale, and |a| cannot exceed that on all three axes at once.
+    # Measured: per-axis max 15.96 / 14.96 / 12.38 g, |a| max 205.0 m/s2
+    # (20.9 g), with `ax` hard-clipped for samples 181-199 — a 45.7 ms plateau
+    # that is centripetal, not an impact spike (Artifacts/analysis.md §2.2d).
+    fs_ms2 = config.ACCEL_FULL_SCALE_G * config.G
+    axis_max = float(np.abs(accel).max())
+    mag_max = float(np.linalg.norm(accel, axis=1).max())
     check(
-        "accel magnitude within physics range (0<a<40 m/s2)",
-        bool((np.linalg.norm(accel, axis=1) < 40).all()),
-        f"max={np.linalg.norm(accel, axis=1).max():.1f}",
+        f"no accel axis beyond the +/-{config.ACCEL_FULL_SCALE_G:g} g full scale",
+        axis_max <= fs_ms2 * 1.01,
+        f"max |a_i|={axis_max / config.G:.2f} g",
+    )
+    check(
+        "accel magnitude inside the sensor envelope "
+        f"(0 < |a| <= sqrt(3)*{config.ACCEL_FULL_SCALE_G:g} g)",
+        0.0 < mag_max <= np.sqrt(3) * fs_ms2 * 1.01,
+        f"max={mag_max:.1f} m/s2 ({mag_max / config.G:.1f} g)",
     )
 
     # ---- Orientation ----------------------------------------------------- #

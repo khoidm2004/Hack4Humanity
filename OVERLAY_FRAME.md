@@ -1,3 +1,20 @@
+> **SUPERSEDED (2026-10-04).** The "What the fit achieves, and what it cannot"
+> table below and its arc-mismatch reasoning were read off a reconstruction
+> built on two since-fixed defects: a scrambled initial quaternion (171.8°
+> off, `src/fusion.py:103`) and — the one that actually produced the "2.01×
+> arc, 427° of turning" numbers — `config.SLOWMO_SCALE = 1.0` on footage that
+> is really ~240 fps slow motion played at 30 fps, which compared 0.96 s of
+> IMU motion against 0.12 s of real video time. Neither is a camera-frame
+> problem; both are corrected in `FUSION_NOTES.md`, which is now the current
+> write-up for the arc/turning numbers. After the quaternion fix,
+> `corr(world +Z, OBSERVED head v)` stays **positive** (+0.649 before, +0.725
+> after — not a sign flip, since the orientation fix is a constant
+> left-multiply that the annotated-frame window and `_order_correlations`
+> below both re-absorb); `ord_v`/`ord_u`, the actual hard gates, hold at
+> +0.956/+0.998. This file's coordinate-frame derivation (Z-up world, Y-down
+> camera, the bridging rotation) is unaffected and still the reference for
+> that part.
+
 # Overlay coordinate frames
 
 Two coordinate conventions meet at the video-overlay projection in

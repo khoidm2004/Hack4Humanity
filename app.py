@@ -115,7 +115,14 @@ def render_overlay_controls(swing):
 
         st.markdown("**Rough time sync**")
         scale = st.number_input("slow-mo scale", 1.0, 12.0,
-                                config.SLOWMO_SCALE, 0.1)
+                                config.SLOWMO_SCALE, 0.1,
+                                help="config.SLOWMO_SCALE is now 8.0 "
+                                     "(240 fps capture / 30 fps playback, "
+                                     "measured in scripts/measure_capture_fps.py). "
+                                     "Used only as a fallback for clips with "
+                                     "no per-video sync table — swing_angle_1.mp4 "
+                                     "uses the exact rescaled frame_exact "
+                                     "mapping from SyncedData instead.")
         offset = st.number_input("sync offset (s)", -3.0, 3.0, 0.0, 0.01)
 
         show_path = st.checkbox("path", True)
@@ -345,12 +352,12 @@ def _player(meta, cam, swing, opts, metrics, sync_table=None):
     t_video = idx / meta.fps
     img = get_frame(meta.path, int(idx))
 
+    covered = True
     if sync_table is not None and sync_table.syncable:
         # Centred, not `imu_idx_for_frame`: that one argmins over the rounded
-        # frame index and so returns the FIRST sample of the frame's bin, half
-        # a frame (~7 IMU samples) early. Near impact the tip moves ~0.45 m
-        # inside one bin, so the dot was landing noticeably behind the racket.
+        # frame index and so returns the FIRST sample of the frame's bin.
         dot_idx = sync_table.imu_idx_for_frame_centered(int(idx))
+        covered = sync_table.covers_frame(int(idx))
         scale, offset = 1.0, 0.0   # unused when dot_idx is passed
     else:
         dot_idx = None
@@ -359,7 +366,8 @@ def _player(meta, cam, swing, opts, metrics, sync_table=None):
     overlaid = _cam.draw_overlay(
         img, cam, swing, t_video, meta.fps,
         scale=scale, offset=offset, dot_idx=dot_idx,
-        show_path=opts["show_path"], show_dot=opts["show_dot"],
+        show_path=opts["show_path"] and covered,
+        show_dot=opts["show_dot"] and covered,
         show_impact=opts["show_impact"],
     )
     st.image(cv2.cvtColor(overlaid, cv2.COLOR_BGR2RGB),
@@ -367,6 +375,11 @@ def _player(meta, cam, swing, opts, metrics, sync_table=None):
                      f"t_video={t_video:.2f}s")
     st.caption("🔵 path (pivot model) · 🔴 animated dot · "
                "impact ring · grey = sliders aligned to racket")
+    if not covered:
+        st.caption("⚠️ The 400-sample IMU record does not reach this frame "
+                   f"({idx}); at {config.CAPTURE_FPS:g} fps capture it covers "
+                   "roughly frames 15-245. Overlay hidden rather than frozen "
+                   "at the record's first or last sample.")
 
 
 if __name__ == "__main__":

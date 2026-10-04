@@ -10,6 +10,11 @@ whose rows carry:
 
 ``swing_angle_2.mp4`` is a different take with no ball strike, so its table is
 *not* syncable (all ``frame_index = -1``); the app must handle that explicitly.
+
+``frame_exact``/``frame_index`` are **rescaled at load time** by
+``config.SLOWMO_SCALE`` about ``config.SYNC_ANCHOR_FRAME`` (see
+``_apply_slowmo`` below) — the CSV on disk is the unscaled 30 fps table built
+by ``scripts/run_sync.py`` under the (wrong) real-time assumption.
 """
 
 from __future__ import annotations
@@ -22,6 +27,57 @@ import pandas as pd
 
 from . import config
 from .sync import paths as sync_paths
+from .video import probe as _probe_video
+
+
+def _apply_slowmo(label, video_path, frame_exact, frame_index):
+    """Rescale a sync table from playback time to capture time.
+
+    `data/synced_data_<label>.csv` was built by `scripts/run_sync.py` under the
+    assumption that the footage is real-time 30 fps, so its `frame_exact` runs
+    at `PLAYBACK_FPS / FS` = 30/416 frames per IMU sample.  The clips are
+    actually ~240 fps slow motion (see `config.CAPTURE_FPS`), so the true rate
+    is `CAPTURE_FPS / FS` = 240/416 - `config.SLOWMO_SCALE` times steeper.
+
+    The rescale is applied ABOUT the ball-contact anchor, which is the single
+    event `src/sync/align.py` fitted the offset to, so that correspondence is
+    preserved exactly and only the rate changes:
+
+        frame_exact_new = anchor + (frame_exact_old - anchor) * SLOWMO_SCALE
+
+    This is done here, at load time, rather than by regenerating the CSV: the
+    committed sync tables stay byte-identical on disk and every caller
+    (`src/overlay_calib.py`, `app.py`) picks the correction up for free.
+
+    `scale == 1.0`, a label with no anchor, or an unsyncable table all return
+    the inputs unchanged.  Samples whose rescaled frame falls outside the
+    decoded clip get `frame_index = -1`, the same contract
+    `src/sync/align.build_synced_frame` uses.
+    """
+    scale = float(config.SLOWMO_SCALE)
+    anchor = config.SYNC_ANCHOR_FRAME.get(label)
+    if anchor is None or abs(scale - 1.0) < 1e-9 or len(frame_exact) == 0:
+        return frame_exact, frame_index
+
+    fe = np.asarray(frame_exact, float).copy()
+    fi = np.asarray(frame_index, int).copy()
+    good = np.isfinite(fe) & (fi >= 0)
+    if not good.any():
+        return fe, fi
+
+    fe[good] = float(anchor) + (fe[good] - float(anchor)) * scale
+    fi[good] = np.rint(fe[good]).astype(int)
+
+    # Mark samples the widened window pushes off the end of the clip.
+    n_frames = None
+    try:
+        n_frames = int(_probe_video(str(video_path)).n_frames)
+    except Exception:                                      # noqa: BLE001
+        n_frames = None
+    outside = good & ((fe < -0.5) | ((fe > n_frames - 0.5) if n_frames else False))
+    fi[outside] = -1
+    fe[outside] = np.nan
+    return fe, fi
 
 
 @dataclass
@@ -60,10 +116,16 @@ class SyncedData:
             t_sample = df["t_sample"].to_numpy(dtype=float)
             frame_index = df["frame_index"].to_numpy(dtype=int)
             frame_exact = df["frame_exact"].to_numpy(dtype=float)
+            frame_exact, frame_index = _apply_slowmo(
+                label, video_path, frame_exact, frame_index)
             # Any valid row means the video is syncable to the CSV.
             syncable = bool((frame_index >= 0).any())
             if syncable:
                 valid = frame_index >= 0
+                # NOTE: `t_video`/`offset_s` describe the UNRESCALED table and
+                # are informational only — nothing outside this class reads
+                # them, and with SLOWMO_SCALE != 1 the relation is no longer a
+                # pure offset.  `frame_exact`/`frame_index` are authoritative.
                 offset_s = float(np.median(df.loc[valid, "t_video"]
                                              - df.loc[valid, "t_sample"]))
 
@@ -158,3 +220,19 @@ class SyncedData:
         if f >= 0:
             return int(f)
         return self.imu_idx_for_frame(f)
+
+    def covers_frame(self, frame: int, tol: float = 1.0) -> bool:
+        """True when some valid sample maps within ``tol`` frames of ``frame``.
+
+        The lookups clamp to the nearest valid sample, which is right for a
+        scrub slider spanning the whole clip but means a frame outside the IMU
+        record silently returns the record's first or last sample.  Callers use
+        this to say so instead of drawing a frozen overlay as if it were real.
+        """
+        if not self.syncable or len(self.frame_exact) == 0:
+            return False
+        valid = np.flatnonzero((self.frame_index >= 0)
+                               & np.isfinite(self.frame_exact))
+        if valid.size == 0:
+            return False
+        return bool(np.min(np.abs(self.frame_exact[valid] - float(frame))) <= tol)

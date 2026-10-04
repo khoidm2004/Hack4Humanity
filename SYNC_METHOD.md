@@ -21,6 +21,11 @@ and frames cited are in `Artifacts/sync_evidence/`.
 | `swing_angle_1.mp4` | **yes** | **+3.9093 s** (+117.28 frames at 30 fps) | **±1 frame = ±33.3 ms = ±14 CSV samples** |
 | `swing_angle_2.mp4` | **no** — different take, contains no ball strike | — | — |
 
+*(The **rate** this table assumed — real-time 30 fps — was wrong; see the
+correction below. The **offset** above is unaffected: it was anchored on the
+single ball-contact instant, which `src/synced_data.SyncedData`'s rescale
+preserves exactly.)*
+
 The mapping is a pure offset, with no drift or scale term:
 
 ```
@@ -34,6 +39,27 @@ Applied to every row in `data/synced_data_angle_1.csv` and
 ## The three questions that had to be answered first
 
 **1. Is either video slow motion? No — both are real time.**
+
+> **CORRECTION (2026-10-04) — this conclusion is wrong.** Both clips are
+> ~240 fps slow motion played at 30 fps; the true scale factor is **8.0×**, not
+> 1.0×. The scale scan could not have found it: `src/sync/align.py:181`
+> searches `np.arange(0.5, 2.01, 0.02)`, so 8× was **never in the search
+> space**, and the `slow_motion_excluded` test (`align.py:207`, which checks
+> the found plateau against `SCALE_SLOW_MOTION_FACTOR = 2.0`) is satisfied by
+> construction for *any* result the bounded scan can return. The "0.70–1.04× plateau, slow motion
+> decisively excluded" is therefore not a measurement of the frame rate and
+> must not be treated as a constraint. The "measured 30.000 fps" is correct but
+> is the **playback** rate (`mdhd` timescale 600 / `stts` delta 20); the
+> containers carry no capture-rate tag at all. The frame rate was instead
+> measured from the tennis ball's own pixel diameter and parabolic free-fall:
+> 222 and 238 fps in two independent windows, in two different clips. At 30 fps
+> the ball's parabola would make gravity **0.156 m/s²**. Evidence and method:
+> `scripts/measure_capture_fps.py`, `FUSION_NOTES.md` §1. The sync tables on
+> disk are unchanged; `src/synced_data.SyncedData` rescales the mapping at load
+> time by `config.SLOWMO_SCALE` about the ball-contact anchor. The offset
+> above is still correct — it was anchored on contact, a single instant, which
+> the rescale preserves exactly; only the *rate* was wrong.
+
 Both decode at a measured 30.000 fps (from the median inter-frame PTS diff, not
 from a metadata field). Scanning a time-scale factor through the
 IMU/video cross-correlation puts the best scale at 0.84x with a plateau of
@@ -209,6 +235,13 @@ against an impact-dominated gyro signal simply cannot resolve this to ±1 frame.
 **The offset is therefore the event-based one. The two were not averaged.**
 
 **Rate check (is a scale term needed? No).**
+
+> **CORRECTION (2026-10-04) — this conclusion is wrong**, for the same reason
+> as above: the scan below only searches 0.5×-2.0×, so it could not see the
+> true ~8× factor and its "slow motion excluded" verdict says nothing about
+> rates outside that window. See the correction under "Is either video slow
+> motion?" and `FUSION_NOTES.md` §1.
+
 No drift or scale parameter is fitted: over 0.96 s, any plausible clock drift is
 far below one frame, and fitting a second parameter on a short window with one
 event would absorb noise rather than clock error. Instead a scale factor is
