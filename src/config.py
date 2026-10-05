@@ -48,9 +48,43 @@ L_HANDLE = 0.20              # m — distance from the wrist pivot to the grip e
 # For the PIVOT model the racket tip is at this distance from the pivot (wrist).
 RACKET_TIP_LEN = L_TOTAL
 
+# Which BODY axis the racket points along, as a unit vector in sensor axes.
+# MEASURED, not assumed.  The sensor is taped to the string bed (see
+# GESTURE_LP_HZ below), so its axes are set by how it was taped, and the
+# original `[0, 0, 1]` was an unverified assumption inherited from PLAN.md.
+#
+# Evidence (Artifacts/analysis.md §7.1): a sensor at body-frame radius `r`
+# reads `f = (ww^T - |w|^2 I) r + b`, linear in `r`.  Least squares over the
+# unclipped samples (`fusion.fit_centripetal_lever`) gives
+#     post-impact 205-399 : |r| 0.213 m   [-0.997 +0.039 +0.061]
+#     all unclipped       : |r| 0.285 m   [-0.970 -0.065 -0.234]
+#     high-omega unclipped: |r| 0.185 m   [-0.949 -0.314 -0.010]
+# — every window within ~15-20 deg of -x and ~90 deg off the modelled +z.
+# Raw confirmation with no fitting at all: through the downswing `ax` climbs
+# 79 -> 90 -> 114 -> 136 m/s2 then saturates at 156.5, while `ay`/`az` stay
+# inside +/-55.
+#
+# CLEAN -x rather than an oblique axis, deliberately.  The three windows'
+# off-axis components point in three DIFFERENT directions (+z-ish, -z-ish,
+# -y-ish); a genuinely oblique mount would make them agree on which way it
+# leans.  They do not, so the scatter is fit noise about a clean axis.
+# A held-out video grid search (§7.2) optimises at [-0.981 +0.173 +0.087],
+# 11 deg from here and 8 deg from the accelerometer answer — INDEPENDENT
+# CONFIRMATION, from a channel the accelerometer fit never saw.  It is not
+# adopted: committing the direction that scored best on the held-out set
+# would be fitting to it and would destroy its value as evidence.
+# For the record, pure -x scores 10.1 deg mean image-angle error against
+# that held-out set and the grid optimum 5.3 deg; the pre-fix +z scores
+# 114.3 deg.
+#
+# UNIT VECTOR ONLY — the length stays `RACKET_TIP_LEN`, so |tip| is
+# unchanged and `overlay_calib.racket_pixel_scale`'s L-cancellation argument
+# still holds.  Do not fold a length in here.
+RACKET_LEVER_BODY = (-1.0, 0.0, 0.0)
+
 # --------------------------------------------------------------------------- #
 # Reconstruction mode
-#    "pivot"        : tip = pivot + R(t) @ [0, 0, L]   <-- main overlay
+#    "pivot"        : tip = pivot + R(t) @ (L * RACKET_LEVER_BODY)  <-- main overlay
 #    "rest_to_rest" : double-integrate gravity-free accel with drift correction
 # --------------------------------------------------------------------------- #
 MODE = "pivot"
@@ -76,12 +110,24 @@ GRAVITY_REF_SAMPLES = 25
 # keeping the swing shape intact.
 GESTURE_LP_HZ = 25.0
 
-# Complementary-filter weight applied to the accel-measured roll/pitch.
-# This sensor is mounted on the strings: impact and string vibration make its
-# acceleration unsuitable as a gravity reference during the swing.  The
-# previous 0.4 correction pulled the gyro orientation backwards and suppressed
-# the follow-through.  Keep gyro integration as the default; setting a nonzero
-# value remains an explicit experiment for data with a reliable gravity signal.
+# Complementary-filter weight.  MUST STAY 0.0: the only implementation this
+# repo ever had was broken, and has been DELETED rather than fixed
+# (`fusion.integrate_orientation` now raises on a nonzero alpha).
+#
+# What was wrong (Artifacts/analysis.md §6): the `alpha > 0` branch ended
+# `rot_accum = _rotation_aligning(g_sensor, g_world)`, which REPLACES the
+# integrated attitude instead of blending into it.  `_rotation_aligning`
+# returns the minimal rotation between two vectors, so its axis is
+# perpendicular to gravity by construction and it carries ZERO heading.
+# Measured: seed 137 deg of pure heading, run the branch, and the component
+# about gravity comes out 0.0000 deg.  It was a hard reset to a gravity-only
+# attitude, every sample, at any alpha > 0.
+#
+# Not rewritten, deliberately: there is NO static window anywhere in this
+# record to validate a gravity correction against (the quietest 25 samples
+# carry 113 deg/s), and every alpha measured end to end was worse —
+# 0.01 -> 33.4 px fit / 429 px held-out; 0.05 -> 28.9 / 270;
+# 0.4 -> 24.7 / 277; 0.002 -> pose rejected outright.
 COMP_FILTER_ALPHA = 0.0
 
 # --------------------------------------------------------------------------- #
