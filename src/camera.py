@@ -540,7 +540,7 @@ def draw_overlay(
         lo = max(0, int(lo))
         hi = min(len(swing.tip) - 1, int(hi))
         if hi > lo:
-            curve = _drawable(project_path(cam, swing.tip[lo:hi + 1]))
+            curve = _drawable(project_path(cam, swing.head[lo:hi + 1]))
             pts = curve.astype(np.int32)
             nseg = len(pts) - 1
             for k in range(nseg):
@@ -558,15 +558,27 @@ def draw_overlay(
                          thick, lineType=cv2.LINE_AA)
 
     # Impact marker (always at its true projected location).
+    #
+    # The ring is 22 px, NOT the dot's 12 px, deliberately.  `impact_idx` = 199
+    # maps to frame_exact 130.13 and the animated dot at f130 IS sample 199, so
+    # with both rings at 12 px they were EXACTLY concentric at the contact frame
+    # (measured 0.0 px apart) and the dot's white ring, drawn second, overdrew
+    # the blue one — the "when the ball contacts the racket the animated dot is
+    # affected" symptom.  A marker changing appearance, not a marker moving:
+    # pure rendering, zero geometric content (Artifacts/analysis.md §8.1).
+    # Enlarging the ring keeps the marker where it truly projects, which is its
+    # whole point, and leaves the dot legible INSIDE it at every frame; the
+    # label is offset clear of both.  Do not "fix" this by hiding the marker
+    # away from impact — it is wanted on every frame.
     if show_impact and 0 <= swing.impact_idx < len(swing.tip):
-        imp = _drawable(project_points(cam, swing.tip[swing.impact_idx])).ravel()
-        cv2.circle(out, tuple(int(round(v)) for v in imp), 12, impact_color, 2)
-        cv2.putText(out, "IMPACT", (int(imp[0]) + 12, int(imp[1]) - 8),
+        imp = _drawable(project_points(cam, swing.head[swing.impact_idx])).ravel()
+        cv2.circle(out, tuple(int(round(v)) for v in imp), 22, impact_color, 2)
+        cv2.putText(out, "IMPACT", (int(imp[0]) + 26, int(imp[1]) - 18),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.6, impact_color, 2)
 
     # Animated dot at the current video time.
     if show_dot:
-        dot = _drawable(project_points(cam, swing.tip[idx])).ravel()
+        dot = _drawable(project_points(cam, swing.head[idx])).ravel()
         cv2.circle(out, tuple(int(round(v)) for v in dot), 7, dot_color, -1)
         cv2.circle(out, tuple(int(round(v)) for v in dot), 12, (255, 255, 255), 2)
 

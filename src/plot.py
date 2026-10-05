@@ -22,16 +22,18 @@ def figure_3d(swing: Swing, metrics: dict | None = None) -> go.Figure:
     The racket-head path is drawn in two segments — before/at impact and after
     impact — so the follow-through is clearly visible instead of appearing to
     end at the impact peak.  The racket itself is drawn as a line from the
-    pivot (wrist) to the head tip for a sample of orientations.
+    pivot (wrist) to the head tip for a sample of orientations; the pivot now
+    moves (`Swing.pivot`) rather than sitting at the world origin.
     """
     fig = go.Figure()
     imp = swing.impact_idx
+    head = swing.head
 
     # Racket-head trajectory (pivot model) — primary curve, split at impact.
     pre = slice(0, imp + 1)
     post = slice(imp, None)
     fig.add_trace(go.Scatter3d(
-        x=swing.tip[pre, 0], y=swing.tip[pre, 1], z=swing.tip[pre, 2],
+        x=head[pre, 0], y=head[pre, 1], z=head[pre, 2],
         mode="lines",
         line=dict(color="#00E5FF", width=4),
         name="Path → impact",
@@ -39,7 +41,7 @@ def figure_3d(swing: Swing, metrics: dict | None = None) -> go.Figure:
         hovertemplate="%{hovertext}<extra></extra>",
     ))
     fig.add_trace(go.Scatter3d(
-        x=swing.tip[post, 0], y=swing.tip[post, 1], z=swing.tip[post, 2],
+        x=head[post, 0], y=head[post, 1], z=head[post, 2],
         mode="lines",
         line=dict(color="#69F0AE", width=4),
         name="Path after impact (follow-through)",
@@ -47,13 +49,14 @@ def figure_3d(swing: Swing, metrics: dict | None = None) -> go.Figure:
         hovertemplate="%{hovertext}<extra></extra>",
     ))
 
-    # A few racket sticks to show orientation.
+    # A few racket sticks to show orientation — pivot -> head, not origin -> tip.
     n_sticks = 26
-    skip = max(1, len(swing.tip) // n_sticks)
-    for i in range(0, len(swing.tip), skip):
-        tip = swing.tip[i]
+    skip = max(1, len(head) // n_sticks)
+    for i in range(0, len(head), skip):
         fig.add_trace(go.Scatter3d(
-            x=[0, tip[0]], y=[0, tip[1]], z=[0, tip[2]],
+            x=[swing.pivot[i, 0], head[i, 0]],
+            y=[swing.pivot[i, 1], head[i, 1]],
+            z=[swing.pivot[i, 2], head[i, 2]],
             mode="lines",
             line=dict(color="rgba(255,255,255,0.25)", width=1),
             showlegend=False,
@@ -69,7 +72,7 @@ def figure_3d(swing: Swing, metrics: dict | None = None) -> go.Figure:
 
     # Impact point.
     fig.add_trace(go.Scatter3d(
-        x=[swing.tip[imp, 0]], y=[swing.tip[imp, 1]], z=[swing.tip[imp, 2]],
+        x=[head[imp, 0]], y=[head[imp, 1]], z=[head[imp, 2]],
         mode="markers",
         marker=dict(size=8, color="#FF0000"),
         name=f"Impact (t={swing.t[imp]:.2f}s)",

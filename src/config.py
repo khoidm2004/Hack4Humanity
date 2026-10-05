@@ -83,6 +83,53 @@ RACKET_TIP_LEN = L_TOTAL
 RACKET_LEVER_BODY = (-1.0, 0.0, 0.0)
 
 # --------------------------------------------------------------------------- #
+# Wrist / pivot translation
+# --------------------------------------------------------------------------- #
+# How much of the `fusion.rest_to_rest_cog` path to use as the wrist (pivot)
+# translation: `Swing.pivot = WRIST_PIVOT_COG_SCALE * cog`, and the racket head
+# is `pivot + tip`.  Until 2026-10-05 `pivot_tip` pinned the wrist at the world
+# origin, so the whole racket was a rigid sphere of radius RACKET_TIP_LEN about
+# a point that never moves — while the real wrist travels 258 px across the
+# annotated window and rises to shoulder height through the follow-through.
+#
+# NOT a physical fraction.  `rest_to_rest_cog` detrends its output about the
+# origin (`fusion._detrend_rest_to_rest`), so `cog`'s amplitude is set by that
+# detrending, not by physics, and PnP absorbs any constant part into `tvec`.
+# It therefore has to be CALIBRATED, and the calibration below uses
+# FIT-WINDOW DATA ONLY (Artifacts/analysis.md §7, §10.2):
+#
+#   AMPLITUDE MATCHING (route 1, the committed route) —
+#     annotated wrist travel f116-145 : 258.118 px   (wrist_pixel_spread()[2],
+#                                       the FIT reads; held-out never used)
+#     image scale                     : 284.611 px/m (racket_pixel_scale(),
+#                                       committed value, see the caveat below)
+#       -> observed wrist travel      :   0.906914 m
+#     `cog` max pairwise over the same window (samples 175-225) : 0.999390 m
+#       -> k = 0.906914 / 0.999390    =   0.907468  -> 0.907
+#
+#   JOINT PnP OVER THE FIT SET (route 2) — REPORTED, NOT COMMITTED, because it
+#   does not identify k.  Scored on the 13 + contact only, the fit mean and max
+#   residuals fall MONOTONICALLY out to k = 1.5 (16.1 -> 15.5 px mean, 38.9 ->
+#   36.4 px max) with no interior minimum, and the objective is not convex:
+#   k = 0.10, 2.0 and 3.0 are bad PnP minima whose held-out medians are 416,
+#   395 and 410 px while k = 3.0 posts the LOWEST fit median of every cell
+#   tried (14.79 px).  An argmin over the fit set picks a wrong answer here.
+#   What route 2 does say is that 0.907 sits inside a broad flat basin
+#   (0.6-1.1, fit median 15.55-15.69 px), which is agreement, not fitting.
+#
+#   The held-out f146-220 reads were NEVER used to choose this number.  They
+#   are the validation: held-out median 184.1 -> 78.9 px.
+#
+# DOMINANT UNCERTAINTY, declared: `racket_pixel_scale` maxes over f116-145 only
+# and reads 284.6 px/m; over all 26 reads it reads 375.2 px/m, which would make
+# route 1 give k = 0.688.  Widening that window is deliberately OUT OF SCOPE
+# this round (Artifacts/analysis.md §6, §10.3) — it touches `racket_distance_m`
+# and both arc ratios and raises an unsettled question about using held-out
+# reads in a reported metric.  So k is 0.907 +0.000 / -0.219, and both ends sit
+# inside route 2's basin.  Do not "fix" the scale here to move k.
+WRIST_PIVOT_COG_SCALE = 0.907
+
+# --------------------------------------------------------------------------- #
 # Reconstruction mode
 #    "pivot"        : tip = pivot + R(t) @ (L * RACKET_LEVER_BODY)  <-- main overlay
 #    "rest_to_rest" : double-integrate gravity-free accel with drift correction

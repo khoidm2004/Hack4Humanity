@@ -141,6 +141,40 @@ def run_checks(accel, gyro, swing) -> list[str]:
         f"sweep={cog_span:.2f} m",
     )
 
+    # ---- Wrist / pivot translation (the contract field added 2026-10-05) -- #
+    # `tip` is the head RELATIVE to the pivot, so the radius check above still
+    # holds exactly and the head is `swing.head = pivot + tip`.  Folding
+    # `pivot` into `tip` instead would have broken that radius check, both
+    # lever-direction checks below, and `racket_pixel_scale`'s L-cancellation
+    # argument at once (|tip + 0.907*cog| runs 0.686 -> ~1.5 m) — which is why
+    # it is its own field.  See Artifacts/analysis.md §9.3.
+    expect_pivot = config.WRIST_PIVOT_COG_SCALE * swing.cog
+    pdev = float(np.abs(swing.pivot - expect_pivot).max())
+    check("pivot finite", bool(np.isfinite(swing.pivot).all()))
+    check("pivot shape matches tip",
+          swing.pivot.shape == swing.tip.shape,
+          f"{swing.pivot.shape} vs {swing.tip.shape}")
+    check(
+        "pivot is WRIST_PIVOT_COG_SCALE * cog",
+        pdev < 1e-12,
+        f"scale={config.WRIST_PIVOT_COG_SCALE:g} max|dev|={pdev:.2e} m",
+    )
+    pivot_span = float(np.linalg.norm(
+        swing.pivot.max(axis=0) - swing.pivot.min(axis=0)))
+    check("pivot span bounded (< 3 m)", bool(pivot_span < 3.0),
+          f"span={pivot_span:.2f} m")
+    head_r = np.linalg.norm(swing.head - swing.pivot, axis=1)
+    check(
+        "head - pivot is still the racket lever (radius preserved)",
+        bool(np.allclose(head_r, config.RACKET_TIP_LEN, atol=1e-9)),
+        f"r={head_r.mean():.6f}",
+    )
+    checks.append(
+        f"[INFO] wrist translation now modelled: pivot span {pivot_span:.2f} m "
+        f"(was 0.00 m, wrist pinned at the origin). The head is `pivot + tip`; "
+        f"`|tip|` is unchanged at {config.RACKET_TIP_LEN} m by construction."
+    )
+
     # ---- Impact ---------------------------------------------------------- #
     metrics = compute_metrics(swing)
     check(

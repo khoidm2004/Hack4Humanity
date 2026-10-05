@@ -83,7 +83,7 @@ def held_out_residuals(sol, swing_alt, sync, lo_sample_lookup):
     cam = sol.camera(WIDTH, HEIGHT)
     for f in sorted(oc.RACKET_HEAD_PX_HELDOUT_ANGLE_1):
         idx = sync.imu_idx_for_frame_centered(f)
-        proj = camera.project_points(cam, swing_alt.tip[idx]).ravel()
+        proj = camera.project_points(cam, swing_alt.head[idx]).ravel()
         obs = np.asarray(oc.RACKET_HEAD_PX_HELDOUT_ANGLE_1[f], float)
         resid = float(np.linalg.norm(proj - obs))
         rows.append((f, idx, proj[0], proj[1], obs[0], obs[1], resid))
@@ -91,20 +91,30 @@ def held_out_residuals(sol, swing_alt, sync, lo_sample_lookup):
 
 
 def held_out_image_angle(sol, swing_alt, sync):
-    """Per held-out frame: signed racket image-angle error, model vs video."""
+    """Per held-out frame: signed racket image-angle error, model vs video.
+
+    The model vector's tail is the PROJECTED PIVOT AT THAT SAMPLE, not the
+    world origin: with `Swing.pivot` carrying the wrist translation the pivot
+    pixel moves, and using a fixed origin would reintroduce exactly the
+    tail mismatch that made the old apparent-length ratio read 1.46
+    (Artifacts/analysis.md §3).
+    """
     cam = sol.camera(WIDTH, HEIGHT)
-    origin_px = camera.project_points(cam, np.zeros(3)).ravel()
     rows = []
+    pivot_px_first = None
     for f in sorted(oc.RACKET_HEAD_PX_HELDOUT_ANGLE_1):
         idx = sync.imu_idx_for_frame_centered(f)
-        head_px = camera.project_points(cam, swing_alt.tip[idx]).ravel()
-        m = head_px - origin_px
+        pivot_px = camera.project_points(cam, swing_alt.pivot[idx]).ravel()
+        if pivot_px_first is None:
+            pivot_px_first = pivot_px
+        head_px = camera.project_points(cam, swing_alt.head[idx]).ravel()
+        m = head_px - pivot_px
         o = (np.asarray(oc.RACKET_HEAD_PX_HELDOUT_ANGLE_1[f], float)
              - np.asarray(oc.WRIST_PX_HELDOUT_ANGLE_1[f], float))
         err = wrap180(np.degrees(np.arctan2(m[1], m[0])
                                   - np.arctan2(o[1], o[0])))
         rows.append((f, err))
-    return rows, origin_px
+    return rows, pivot_px_first
 
 
 def print_lever_and_fit(lever, accel, gyro):
@@ -168,7 +178,7 @@ def print_pixel_table(sol, swing_alt, sync):
     for f in TABLE_FRAMES:
         covered = sync.covers_frame(f)
         idx = sync.imu_idx_for_frame_centered(f)
-        proj = camera.project_points(cam, swing_alt.tip[idx]).ravel()
+        proj = camera.project_points(cam, swing_alt.head[idx]).ravel()
         u, v = float(proj[0]), float(proj[1])
         step = float(np.linalg.norm(proj - prev)) if prev is not None else float("nan")
         prev = proj
@@ -226,8 +236,9 @@ def print_held_out_residual(sol, swing_alt, sync):
 
 def print_held_out_angle(sol, swing_alt, sync):
     _rule("5. Held-out racket image-angle error, f146-220 (criterion 4b)")
-    rows, origin_px = held_out_image_angle(sol, swing_alt, sync)
-    print(f"  pivot projects to approx ({origin_px[0]:.1f}, {origin_px[1]:.1f}) px")
+    rows, pivot_px_first = held_out_image_angle(sol, swing_alt, sync)
+    print(f"  pivot (at the first held-out frame) projects to approx "
+          f"({pivot_px_first[0]:.1f}, {pivot_px_first[1]:.1f}) px")
     print(f"  {'frame':>6}{'signed err deg':>16}")
     for f, err in rows:
         print(f"  {f:6d}{err:16.1f}")
@@ -241,7 +252,7 @@ def print_windowed_extent(sol, swing_alt, sync):
     frames = sorted(oc.RACKET_HEAD_PX_ANGLE_1)
     lo = sync.imu_idx_for_frame_centered(frames[0])
     hi = sync.imu_idx_for_frame_centered(frames[-1])
-    curve = camera.project_points(cam, swing_alt.tip[lo:hi + 1])
+    curve = camera.project_points(cam, swing_alt.head[lo:hi + 1])
     fin = np.isfinite(curve).all(axis=1)
     span_u = float(np.ptp(curve[fin, 0]))
     span_v = float(np.ptp(curve[fin, 1]))
@@ -266,90 +277,158 @@ def print_arc_ratio(swing_alt, sync):
     print("  Neither number above is to be chased by scaling anything.")
 
 
-def run_wrist_sweep(quat, lever, sync, accel, gyro, swing0):
-    _rule("8. Wrist-sweep experiment (deliverable 7, --wrist-sweep only)")
-    ks = [0.0, 0.1, 0.2, 0.3, 0.5, 0.75, 1.0]
-    print(f"  {'k':>6}{'fit13 med':>12}{'held-out med':>14}{'mean |ang|':>12}"
-          f"{'max resid':>12}{'inliers':>10}")
-    base_tip = tip_for_lever(quat, lever)
-    results = {}
+def ratio_ab(sol, swing_alt, sync):
+    """Apparent-length ratios A (from the projected pivot) and B (from the
+    annotated wrist), over all 26 head reads. A was meaningless while the
+    pivot was pinned; it is a real measurement now that the pivot moves."""
+    cam = sol.camera(WIDTH, HEIGHT)
+    head = {**oc.RACKET_HEAD_PX_ANGLE_1, **oc.RACKET_HEAD_PX_HELDOUT_ANGLE_1}
+    wrist = {**oc.WRIST_PX_ANGLE_1, **oc.WRIST_PX_HELDOUT_ANGLE_1}
+    a_vals, b_vals = [], []
+    for f in sorted(set(head) & set(wrist)):
+        idx = sync.imu_idx_for_frame_centered(f)
+        pivot_px = camera.project_points(cam, swing_alt.pivot[idx]).ravel()
+        head_px = camera.project_points(cam, swing_alt.head[idx]).ravel()
+        obs_head = np.asarray(head[f], float)
+        obs_wrist = np.asarray(wrist[f], float)
+        denom = float(np.linalg.norm(obs_head - obs_wrist))
+        a_vals.append(float(np.linalg.norm(head_px - pivot_px)) / denom)
+        b_vals.append(float(np.linalg.norm(head_px - obs_wrist)) / denom)
+    return float(np.median(a_vals)), float(np.median(b_vals))
+
+
+def print_before_after(swing0, sync, lever):
+    """Deliverable 4 — eight statistics, k=0 against the committed k."""
+    _rule("8. Before/after — the omitted wrist translation (deliverable 4)")
+    base_tip = tip_for_lever(swing0.quat, lever)
+    ks = (0.0, config.WRIST_PIVOT_COG_SCALE)
+    print(f"  {'k':>6}{'fit med':>9}{'fit mean':>10}{'fit max':>9}{'inl':>7}"
+          f"{'held med':>10}{'mean|ang|':>11}{'|tvec|':>8}"
+          f"{'ratioA':>8}{'ratioB':>8}  {'solver':<10}")
+    rows = {}
     for k in ks:
-        tip_k = k * swing0.cog + base_tip
-        swing_k = replace(swing0, tip=tip_k)
+        swing_k = replace(swing0, tip=base_tip, pivot=k * swing0.cog)
         corr, sol = solve_for(swing_k, sync)
         held_rows = held_out_residuals(sol, swing_k, sync, None)
         held_resids = np.array([r[-1] for r in held_rows], float)
         angle_rows, _ = held_out_image_angle(sol, swing_k, sync)
         angle_errs = np.array([r[1] for r in angle_rows], float)
-        results[k] = dict(
-            fit_med=sol.median_px, held_med=float(np.median(held_resids)),
+        ratio_a, ratio_b = ratio_ab(sol, swing_k, sync)
+        row = dict(
+            fit_med=sol.median_px, fit_mean=sol.mean_px, fit_max=sol.max_px,
+            inliers=int(sol.inliers.sum()), n=len(sol.inliers),
+            held_med=float(np.median(held_resids)),
             mean_abs_angle=float(np.mean(np.abs(angle_errs))),
-            max_resid=sol.max_px, inliers=int(sol.inliers.sum()),
+            tvec=sol.camera_distance_m, ratio_a=ratio_a, ratio_b=ratio_b,
+            solver=sol.solver,
         )
-        print(f"  {k:6.2f}{sol.median_px:12.1f}{float(np.median(held_resids)):14.1f}"
-              f"{float(np.mean(np.abs(angle_errs))):12.1f}{sol.max_px:12.1f}"
-              f"{int(sol.inliers.sum()):10d}")
+        rows[k] = row
+        print(f"  {k:6.3f}{row['fit_med']:9.2f}{row['fit_mean']:10.2f}"
+              f"{row['fit_max']:9.2f}{row['inliers']:4d}/{row['n']:<2d}"
+              f"{row['held_med']:10.1f}{row['mean_abs_angle']:11.1f}"
+              f"{row['tvec']:8.3f}{row['ratio_a']:8.3f}{row['ratio_b']:8.3f}"
+              f"  {row['solver']:<10}")
 
-    # Correlations at k=0.
-    swing_k0 = replace(swing0, tip=base_tip)
-    corr0, sol0 = solve_for(swing_k0, sync)
-    cam0 = sol0.camera(WIDTH, HEIGHT)
-    head_rows = held_out_residuals(sol0, swing_k0, sync, None)
-    wrist_disp_v, wrist_disp_u, resid_v, resid_u = [], [], [], []
-    wrist0 = np.asarray(oc.WRIST_PX_HELDOUT_ANGLE_1[sorted(oc.WRIST_PX_HELDOUT_ANGLE_1)[0]], float)
-    cog_proj_u, cog_proj_v, obs_wrist_u, obs_wrist_v = [], [], [], []
-    for f, idx, pu, pv, ou, ov, _resid in head_rows:
-        resid_vec = np.array([pu - ou, pv - ov])
-        wrist_px = np.asarray(oc.WRIST_PX_HELDOUT_ANGLE_1[f], float)
-        disp = wrist_px - wrist0
-        resid_u.append(resid_vec[0]); resid_v.append(resid_vec[1])
-        wrist_disp_u.append(disp[0]); wrist_disp_v.append(disp[1])
-        cog_px = camera.project_points(cam0, swing0.cog[idx]).ravel()
-        cog_proj_u.append(cog_px[0]); cog_proj_v.append(cog_px[1])
-        obs_wrist_u.append(wrist_px[0]); obs_wrist_v.append(wrist_px[1])
+    b0, b1 = rows[ks[0]], rows[ks[1]]
+    print("\n  Delta (committed k - k=0):")
+    print(f"    fit median {b1['fit_med'] - b0['fit_med']:+.2f} px   "
+          f"fit mean {b1['fit_mean'] - b0['fit_mean']:+.2f} px   "
+          f"fit max {b1['fit_max'] - b0['fit_max']:+.2f} px")
+    print(f"    inliers {b1['inliers']}/{b1['n']} vs {b0['inliers']}/{b0['n']}"
+          f"   held-out median {b1['held_med'] - b0['held_med']:+.1f} px   "
+          f"mean|angle| {b1['mean_abs_angle'] - b0['mean_abs_angle']:+.1f} deg")
+    print(f"    |tvec| {b1['tvec'] - b0['tvec']:+.3f} m   "
+          f"ratio A {b1['ratio_a'] - b0['ratio_a']:+.3f}   "
+          f"ratio B {b1['ratio_b'] - b0['ratio_b']:+.3f}")
 
-    print(f"\n  corr(residual v, wrist displacement v) @ k=0 : "
-          f"{_fmt_corr(_corr(resid_v, wrist_disp_v))}")
-    print(f"  corr(residual u, wrist displacement u) @ k=0 : "
-          f"{_fmt_corr(_corr(resid_u, wrist_disp_u))}")
-    print(f"  corr(projected cog u, observed wrist u)      : "
-          f"{_fmt_corr(_corr(cog_proj_u, obs_wrist_u))}")
-    print(f"  corr(projected cog v, observed wrist v)      : "
-          f"{_fmt_corr(_corr(cog_proj_v, obs_wrist_v))}")
+    print("\n  Acceptance criteria (Artifacts/TASK.md):")
+    print(f"    1. held-out median <= 100 px (was {b0['held_med']:.1f})   : "
+          f"{b1['held_med']:.1f} px -> "
+          f"{'PASS' if b1['held_med'] <= 100.0 else 'FAIL'}")
+    print(f"    2. |tvec| in 3.5-4.6 m (was {b0['tvec']:.3f})             : "
+          f"{b1['tvec']:.3f} m -> "
+          f"{'PASS' if 3.5 <= b1['tvec'] <= 4.6 else 'FAIL'}")
+    crit3 = (b1['fit_mean'] <= b0['fit_mean'] and b1['fit_max'] <= b0['fit_max']
+              and b1['inliers'] >= b0['inliers'])
+    print(f"    3. mean/max/inliers improve (median may rise, and did: "
+          f"{b0['fit_med']:.2f} -> {b1['fit_med']:.2f})           : "
+          f"mean {b0['fit_mean']:.1f}->{b1['fit_mean']:.1f}, "
+          f"max {b0['fit_max']:.1f}->{b1['fit_max']:.1f}, "
+          f"inliers {b0['inliers']}->{b1['inliers']} -> "
+          f"{'PASS' if crit3 else 'FAIL'}")
+    print(f"    4. |ratio A - 1| <= 0.10 (was {abs(b0['ratio_a'] - 1.0):.3f}) : "
+          f"{abs(b1['ratio_a'] - 1.0):.3f} -> "
+          f"{'PASS' if abs(b1['ratio_a'] - 1.0) <= 0.10 else 'FAIL'}")
+    print(f"    5. mean |angle error| <= 9.1 deg (was {b0['mean_abs_angle']:.1f})"
+          f"      : {b1['mean_abs_angle']:.1f} deg -> "
+          f"{'PASS' if b1['mean_abs_angle'] <= 9.1 else 'FAIL'}")
 
-    # Fixed rule, decided in advance.
-    base = results[0.0]
-    helps = []
+
+def print_k_routes(swing0, sync, lever):
+    """Both routes for `config.WRIST_PIVOT_COG_SCALE`, and which was committed."""
+    _rule("9. k — both routes (deliverable 2)")
+    print("  Route 1 — amplitude matching (COMMITTED):")
+    r1 = oc.wrist_cog_scale(swing0, sync)
+    for key, val in r1.items():
+        print(f"    {key:<18}: {val}")
+
+    # Out-of-scope sensitivity: racket_pixel_scale's window, all 26 reads.
+    head = {**oc.RACKET_HEAD_PX_ANGLE_1, **oc.RACKET_HEAD_PX_HELDOUT_ANGLE_1}
+    wrist = {**oc.WRIST_PX_ANGLE_1, **oc.WRIST_PX_HELDOUT_ANGLE_1}
+    frames26 = sorted(set(head) & set(wrist))
+    v = np.array([np.subtract(head[f], wrist[f]) for f in frames26], float)
+    longest26 = float(np.linalg.norm(v, axis=1).max())
+    px_per_m_26 = longest26 / config.RACKET_TIP_LEN
+    wrist_m_26 = r1["wrist_max_px"] / px_per_m_26
+    k_26 = wrist_m_26 / r1["cog_max_pairwise_m"]
+    print(f"    OUT-OF-SCOPE sensitivity: racket_pixel_scale over all 26 reads "
+          f"-> {px_per_m_26:.1f} px/m -> k = {k_26:.3f} (vs committed "
+          f"{config.WRIST_PIVOT_COG_SCALE:g}). Not used; racket_pixel_scale's "
+          "window is left as-is this round (analysis §6, §10.3).")
+
+    print("\n  Route 2 — joint PnP over the fit set, REPORTED NOT COMMITTED "
+          "(it does not identify k):")
+    ks = [0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.75, 0.8, 0.85, 0.9, 0.907,
+          0.95, 1.0, 1.25, 1.5, 2.0, 3.0]
+    base_tip = tip_for_lever(swing0.quat, lever)
+    print(f"  {'k':>6}{'fit med':>9}{'fit mean':>10}{'fit max':>9}{'inl':>5}"
+          f"{'|tvec|':>8}  {'solver':<10}"
+          f"{'held med VALIDATION ONLY - not used to choose k':>50}")
     for k in ks:
-        if k == 0.0:
-            continue
-        r = results[k]
-        held_improve = (base["held_med"] - r["held_med"]) / base["held_med"] >= 0.20
-        fit_ok = (r["fit_med"] - base["fit_med"]) <= 2.0
-        angle_ok = r["mean_abs_angle"] <= base["mean_abs_angle"]
-        if held_improve and fit_ok and angle_ok:
-            helps.append(k)
-    if helps:
-        print(f"\n  VERDICT: helps (k={helps}), but NOT landed in this PR — "
-              "adding `cog` to `tip` breaks the |tip|=RACKET_TIP_LEN invariant "
-              "that verify_fusion.py's radius check and racket_pixel_scale's "
-              "L-cancellation both rest on. Report to the coordinator as a "
-              "follow-up task.")
-    else:
-        print("\n  VERDICT: does not clear the fixed rule (held-out median "
-              ">=20% better, fit-13 median <=2px worse, mean |angle error| "
-              "not worse) at any sampled k. Not included.")
+        swing_k = replace(swing0, tip=base_tip, pivot=k * swing0.cog)
+        corr, sol = solve_for(swing_k, sync)
+        held_rows = held_out_residuals(sol, swing_k, sync, None)
+        held_resids = np.array([r[-1] for r in held_rows], float)
+        print(f"  {k:6.3f}{sol.median_px:9.2f}{sol.mean_px:10.2f}"
+              f"{sol.max_px:9.2f}{int(sol.inliers.sum()):5d}"
+              f"{sol.camera_distance_m:8.3f}  {sol.solver:<10}"
+              f"{float(np.median(held_resids)):50.1f}")
+
+    print("\n  Mean and max fall MONOTONICALLY out to k=1.5, so there is no "
+          "interior minimum in this\n  objective. k=0.1/2.0/3.0 are bad PnP "
+          "minima (held-out medians far above the rest) with\n  k=3.0 posting "
+          "the LOWEST fit median of every cell tried — an argmin over the "
+          "fit set\n  would pick a wrong answer here. Therefore route 1 is "
+          f"committed; route 2 is the agreement\n  check — the committed "
+          f"k={config.WRIST_PIVOT_COG_SCALE:g} sits inside the broad flat "
+          "0.6-1.1 basin (fit median 15.55-15.69 px).")
 
 
 def main() -> int:
     p = argparse.ArgumentParser()
     p.add_argument("--lever", type=str, default=None,
                    help="x,y,z body lever to score; default config.RACKET_LEVER_BODY")
-    p.add_argument("--wrist-sweep", action="store_true")
+    p.add_argument("--wrist-sweep", action="store_true",
+                   help="alias, kept for back-compat; the before/after table "
+                        "and both k routes now print unconditionally")
+    p.add_argument("--k", type=float, default=None,
+                   help="pivot = k * cog; default config.WRIST_PIVOT_COG_SCALE. "
+                        "Use --k 0 for the pre-pivot pinned-wrist behaviour.")
     args = p.parse_args()
 
     lever = (config.RACKET_LEVER_BODY if args.lever is None
               else tuple(float(x) for x in args.lever.split(",")))
+    k = (config.WRIST_PIVOT_COG_SCALE if args.k is None else float(args.k))
 
     df = load_csv()
     accel, gyro = to_signal_arrays(df)
@@ -365,10 +444,11 @@ def main() -> int:
         raise LookupError(f"no sync table configured for {oc.LABEL!r}")
 
     tip_alt = tip_for_lever(swing0.quat, lever)
-    swing_alt = replace(swing0, tip=tip_alt)
+    swing_alt = replace(swing0, tip=tip_alt, pivot=k * swing0.cog)
 
     corr, sol = solve_for(swing_alt, sync)
 
+    print(f"\n  k (pivot = k * cog) in use : {k:g}")
     print_lever_and_fit(lever, accel, gyro)
     print_pose(corr, sol)
     print_pixel_table(sol, swing_alt, sync)
@@ -376,9 +456,8 @@ def main() -> int:
     print_held_out_angle(sol, swing_alt, sync)
     print_windowed_extent(sol, swing_alt, sync)
     print_arc_ratio(swing_alt, sync)
-
-    if args.wrist_sweep:
-        run_wrist_sweep(swing0.quat, lever, sync, accel, gyro, swing0)
+    print_before_after(swing0, sync, lever)
+    print_k_routes(swing0, sync, lever)
 
     return 0
 
