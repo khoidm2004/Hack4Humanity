@@ -246,6 +246,21 @@ CALIB_FOV_DEG = 60.0
 # makes this number worse, the check is supposed to fail.
 RECORDED_BASELINE_PX = 13.7
 
+# The OTHER four reprojection statistics, recorded for the same reason and
+# gated the same way by `scripts/check_overlay_match.py`.  Why they exist:
+# modelling the wrist translation (`config.WRIST_PIVOT_COG_SCALE`) made the
+# MEDIAN rise 13.71 -> 15.56 px while the mean fell 23.92 -> 16.13, the max
+# fell 91.16 -> 38.88, RANSAC inliers went 11 -> 13 of 14, and the held-out
+# f146-220 median fell 184.1 -> 78.9 px.  That is a robust fit shedding its
+# two outliers (f130 went 91.2 -> 38.9 px, the ball contact 72.8 -> 22.2), not
+# a regression — but a median-ONLY gate reads it as one.  So the check became
+# multi-statistic rather than `RECORDED_BASELINE_PX` being loosened: 13.7 and
+# its 10 px slack are untouched and still pass (15.56 < 23.7).
+# TIGHTENED, never loosened, same rule as the median above.
+RECORDED_BASELINE_MEAN_PX = 16.2      # measured 16.13
+RECORDED_BASELINE_MAX_PX = 39.0       # measured 38.88
+RECORDED_BASELINE_INLIERS = 13        # of 14
+
 # Two image-side measurements used as independent cross-checks on the pose.
 # `max |head_px - wrist_px|` over the annotated frames is the racket seen
 # closest to fronto-parallel, so it converts `config.RACKET_TIP_LEN` into a
@@ -263,7 +278,7 @@ class Correspondences:
     frames: np.ndarray        # (M,) float — video frame (fractional for contact)
     imu_idx: np.ndarray       # (M,) int — chosen IMU sample
     img_pts: np.ndarray       # (M, 2) float — observed pixels
-    obj_pts: np.ndarray       # (M, 3) float — swing.tip[imu_idx], metres
+    obj_pts: np.ndarray       # (M, 3) float — swing.head[imu_idx], metres
     labels: tuple[str, ...]   # per-point description, for printing
 
     def __len__(self) -> int:
@@ -301,9 +316,9 @@ def build_correspondences(swing, sync, *, include_contact: bool = True,
                 f"{int(sync.frame_index[i])}, not {f}")
         if obj_mode == "binmean":
             bin_ = np.flatnonzero(sync.frame_index == int(f))
-            pt = swing.tip[bin_].mean(axis=0)
+            pt = swing.head[bin_].mean(axis=0)
         else:
-            pt = swing.tip[i]
+            pt = swing.head[i]
         frames.append(float(f))
         idxs.append(int(i))
         img.append(RACKET_HEAD_PX_ANGLE_1[f])
@@ -315,7 +330,7 @@ def build_correspondences(swing, sync, *, include_contact: bool = True,
         frames.append(float(CONTACT_FRAME_EXACT))
         idxs.append(int(i))
         img.append(CONTACT_PIXEL)
-        obj.append(np.asarray(swing.tip[i], float))
+        obj.append(np.asarray(swing.head[i], float))
         labels.append(f"f{CONTACT_FRAME_EXACT:.3f} ball contact")
 
     leaked = set(np.asarray(frames, float).astype(int)) & set(
@@ -378,8 +393,9 @@ def has_annotations(video_name: str) -> bool:
 def wrist_pixel_spread() -> tuple[float, float, float]:
     """``(span_u, span_v, max_pairwise)`` of the annotated wrist pixels.
 
-    The pivot model holds the wrist at the world origin, so this spread is
-    error no rigid pose can remove.
+    This spread is the *measurement* that `config.WRIST_PIVOT_COG_SCALE`
+    amplitude-matches `cog` against (`wrist_cog_scale`); it is no longer an
+    error floor, because the pivot moves.
     """
     w = np.asarray(list(WRIST_PX_ANGLE_1.values()), float)
     span = w.max(axis=0) - w.min(axis=0)
@@ -402,20 +418,66 @@ def racket_pixel_scale() -> tuple[float, float]:
     so dividing by ``config.RACKET_TIP_LEN`` gives an image scale that owes
     nothing to PnP, the fusion output, or the FOV assumption.
 
-    Known 20 % low, reported not fixed: the tennis ball's own pixel diameter
-    (24.0 px / 0.067 m = 359 px/m, `scripts/measure_capture_fps.py`) disagrees
-    with this function's 285 px/m by exactly the ratio 0.686/0.544 — i.e. the
-    open question of what the wrist->head-rim lever really is (analysis §2.5,
-    §7 Q4).  It MUST keep dividing by `config.RACKET_TIP_LEN`, the same length
+    Known window bug, reported not fixed: this function maxes over the
+    f116-145 annotated window only and reads 284.6 px/m there. The earlier
+    claim that this disagreed with the tennis ball's own pixel diameter
+    (24.0 px / 0.067 m = 359 px/m, `scripts/measure_capture_fps.py`) by
+    "exactly the ratio 0.686/0.544" is FALSIFIED: 0.544 was itself a product
+    of this function's f116-145 window, and over all 26 reads it reads
+    375.2 px/m, agreeing with the ball's 359 px/m to 4.5 % (analysis §0, §4).
+    Widening the window is a known open issue left unfixed this round
+    (analysis §6, §10.3).
+
+    It MUST keep dividing by `config.RACKET_TIP_LEN`, the same length
     `fusion.pivot_tip` uses: the `L` then cancels out of
     `model_vs_video_arc`'s `ratio` exactly (analysis §3.1), and changing only
-    one of the two would silently break that cancellation.
+    one of the two would silently break that cancellation. Honest caveat: with
+    `Swing.pivot` now modelling the wrist translation, that L-cancellation in
+    `model_vs_video_arc`'s ratio is only PARTIAL, because `arc3d` is no longer
+    proportional to `L` once a translation that does not scale with `L` is
+    added to it.
     """
     frames = sorted(set(RACKET_HEAD_PX_ANGLE_1) & set(WRIST_PX_ANGLE_1))
     v = np.array([np.subtract(RACKET_HEAD_PX_ANGLE_1[f], WRIST_PX_ANGLE_1[f])
                   for f in frames], float)
     longest = float(np.linalg.norm(v, axis=1).max())
     return longest / config.RACKET_TIP_LEN, longest
+
+
+def wrist_cog_scale(swing, sync) -> dict:
+    """Amplitude-match `cog` against the annotated wrist travel.
+
+    This is ROUTE 1 for `config.WRIST_PIVOT_COG_SCALE`, re-derived from the
+    committed annotations so the constant cannot drift away from the
+    measurement it came from.  **Fit-window reads only** — it touches
+    `WRIST_PX_ANGLE_1` (f116-145) and never
+    `WRIST_PX_HELDOUT_ANGLE_1`/`RACKET_HEAD_PX_HELDOUT_ANGLE_1`, because
+    choosing `k` against the held-out set is exactly the circularity the
+    guard in `build_correspondences` exists to prevent.
+
+    `px_per_m` is `racket_pixel_scale()`'s committed 284.6, whose f116-145
+    window is a known open issue (analysis §6): at the all-26 value of 375.2
+    this returns 0.688 instead of 0.907.  Reported, not fixed here.
+    """
+    frames = sorted(RACKET_HEAD_PX_ANGLE_1)
+    lo = sync.imu_idx_for_frame_centered(frames[0])
+    hi = sync.imu_idx_for_frame_centered(frames[-1])
+    c = np.asarray(swing.cog, float)[lo:hi + 1]
+    d = np.linalg.norm(c[:, None, :] - c[None, :, :], axis=-1)
+    cog_m = float(d.max())
+    wrist_px = wrist_pixel_spread()[2]
+    px_per_m, _ = racket_pixel_scale()
+    wrist_m = wrist_px / px_per_m
+    return {
+        "window_frames": (int(frames[0]), int(frames[-1])),
+        "window_lo": int(lo), "window_hi": int(hi),
+        "wrist_max_px": float(wrist_px),
+        "px_per_m": float(px_per_m),
+        "wrist_travel_m": float(wrist_m),
+        "cog_max_pairwise_m": cog_m,
+        "k": float(wrist_m / cog_m),
+        "committed_k": float(config.WRIST_PIVOT_COG_SCALE),
+    }
 
 
 def racket_distance_m(fov_deg: float = CALIB_FOV_DEG, width: int = 1280) -> float:
@@ -468,7 +530,7 @@ def model_vs_video_arc(swing, sync) -> dict:
     frames = sorted(RACKET_HEAD_PX_ANGLE_1)
     lo = sync.imu_idx_for_frame_centered(frames[0])
     hi = sync.imu_idx_for_frame_centered(frames[-1])
-    tip = swing.tip[lo:hi + 1]
+    tip = swing.head[lo:hi + 1]
     arc3d = float(np.sum(np.linalg.norm(np.diff(tip, axis=0), axis=1)))
 
     px = np.array([RACKET_HEAD_PX_ANGLE_1[f] for f in frames], float)
@@ -488,10 +550,14 @@ def model_vs_video_arc(swing, sync) -> dict:
         "arc3d_expected_px": arc3d * scale,
         "arc2d_observed_px": arc2d,
         "ratio": arc3d * scale / arc2d,
-        # What a CORRECT wrist-pinned pivot model should give: `pivot_tip` holds
-        # the wrist at the origin, so it can only produce the rotational part of
-        # the head's motion, and the repo has measured `wrist_max_px` of wrist
-        # travel it cannot represent. 1.0 is unreachable by construction.
+        # This was the bound while the wrist was pinned at the origin (0.642
+        # here, 0.789 full-span): `pivot_tip` alone could only produce the
+        # rotational part of the head's motion, so 1.0 was unreachable by
+        # construction. With `Swing.pivot` modelling the translation the
+        # target IS 1.0, and the measured ratio moved 0.540 -> 0.904
+        # (annotated window) and 0.820 -> 1.319 (full span). Key name kept
+        # for continuity with callers/FUSION_NOTES even though it is no
+        # longer literally "expected" at this value.
         "ratio_expected": (arc2d - wrist_max_px) / arc2d,
         # `arc / RACKET_TIP_LEN`, kept for continuity with OVERLAY_FRAME.md and
         # renamed because it is NOT a turning measurement: it is the arc in
@@ -500,7 +566,7 @@ def model_vs_video_arc(swing, sync) -> dict:
         # Real total turning, three ways, all directly comparable.
         "turn3d_tangent_deg": tangent_turning_deg(tip),
         "turn3d_tangent_at_frames_deg": tangent_turning_deg(
-            np.array([swing.tip[sync.imu_idx_for_frame_centered(f)]
+            np.array([swing.head[sync.imu_idx_for_frame_centered(f)]
                       for f in frames], float)),
         "turn2d_tangent_observed_deg": tangent_turning_deg(px),
         "turn3d_net_deg": _ang(tip[0], tip[-1]),
@@ -525,7 +591,7 @@ def fullspan_arc_bound(swing, sync) -> dict:
     measured over that same window (258 px).  That pairing is self-consistent,
     and `FUSION_NOTES.md`'s "0.64" came from it.  But it says nothing about
     the follow-through, where the wrist travels much further: over f116-220
-    the max pairwise wrist excursion is 366 px, which moves the bound.
+    the max pairwise wrist excursion is 302.7 px, which moves the bound.
 
     So this reports the SAME quantity over the union of the fit and held-out
     reads, with the wrist spread measured over that same wider span.  The two
@@ -537,7 +603,7 @@ def fullspan_arc_bound(swing, sync) -> dict:
     frames = sorted(head)
     lo = sync.imu_idx_for_frame_centered(frames[0])
     hi = sync.imu_idx_for_frame_centered(frames[-1])
-    tip = swing.tip[lo:hi + 1]
+    tip = swing.head[lo:hi + 1]
     arc3d = float(np.sum(np.linalg.norm(np.diff(tip, axis=0), axis=1)))
     px = np.array([head[f] for f in frames], float)
     arc2d = float(np.sum(np.linalg.norm(np.diff(px, axis=0), axis=1)))

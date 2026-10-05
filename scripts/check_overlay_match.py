@@ -45,6 +45,8 @@ from src import camera, config, overlay_calib  # noqa: E402
 
 TARGET_MEDIAN_PX = 50.0          # acceptance criterion 1 (Artifacts/TASK.md)
 BASELINE_SLACK_PX = 10.0
+MEAN_SLACK_PX = 6.0
+MAX_SLACK_PX = 15.0
 CONTACT_TOLERANCE_PX = 2.0
 # The pre-fix projected path, for criterion 2.
 OLD_PATH_EXTENT_PX = (136.0, 93.0)
@@ -201,12 +203,12 @@ def check_pose(corr, sol: camera.PoseSolution, width: int, height: int, sync) ->
 
     _rule("5. Orientation regression (supersedes the OVERLAY_FRAME.md check)")
     swing = _swing()
-    curve = camera.project_points(sol.camera(width, height), swing.tip)
+    curve = camera.project_points(sol.camera(width, height), swing.head)
     sel = corr.imu_idx
-    cz_obs = float(np.corrcoef(swing.tip[sel, 2], corr.img_pts[:, 1])[0, 1])
-    cz_proj = float(np.corrcoef(swing.tip[:, 2], curve[:, 1])[0, 1])
-    cy = float(np.corrcoef(swing.tip[:, 1], curve[:, 1])[0, 1])
-    cx = float(np.corrcoef(swing.tip[:, 0], curve[:, 0])[0, 1])
+    cz_obs = float(np.corrcoef(swing.head[sel, 2], corr.img_pts[:, 1])[0, 1])
+    cz_proj = float(np.corrcoef(swing.head[:, 2], curve[:, 1])[0, 1])
+    cy = float(np.corrcoef(swing.head[:, 1], curve[:, 1])[0, 1])
+    cx = float(np.corrcoef(swing.head[:, 0], curve[:, 0])[0, 1])
     ord_v = float(np.corrcoef(curve[sel, 1], corr.img_pts[:, 1])[0, 1])
     ord_u = float(np.corrcoef(curve[sel, 0], corr.img_pts[:, 0])[0, 1])
 
@@ -324,22 +326,39 @@ def check_limits(corr, sol: camera.PoseSolution, width: int, height: int,
     print(f"      from racket apparent length   : {d_racket:.2f} m "
           f"({overlay_calib.racket_pixel_scale()[1]:.0f} px, "
           f"{config.RACKET_TIP_LEN} m)")
-    print("      The two image measurements agree with each other, which is "
-          "the useful\n      part: the pixel scale is sound. PnP then places "
-          f"the camera {d_player / d_pnp:.2f}x CLOSER\n      than that scale "
-          "allows. Shrinking the distance is the only freedom PnP has\n"
-          "      for absorbing the arc-length mismatch in (c) — the ratio is "
-          "the same at\n      every FOV, so it is a property of the data, not "
-          "of the lens assumption.")
+    ratio = d_player / d_pnp
+    if ratio > 1.15:
+        verdict = "PnP is CLOSER than the scale allows"
+    elif ratio < 0.87:
+        verdict = "PnP is FURTHER than the scale allows"
+    else:
+        verdict = "AGREEMENT — within 15%"
+    print(f"      PnP vs player-height distance : {ratio:.2f}x ({verdict})")
+    print("      Before the wrist translation was modelled this ratio was "
+          "1.70x: a rigid\n      sphere of radius RACKET_TIP_LEN about a FIXED "
+          "point cannot explain a\n      605 x 503 px head excursion, so PnP "
+          "bought the angular magnification by\n      pulling the camera to "
+          "55% of the player's distance. With `Swing.pivot`\n      carrying "
+          "the wrist, |tvec| is 4.23 m against the 4.08 m player-height "
+          "anchor\n      and the 3.90 m racket-length one.")
 
-    print("\n  (b) Wrist translation the pivot model omits")
+    print("\n  (b) Wrist translation — now MODELLED, not omitted")
     print(f"      annotated wrist pixel spread  : {su:.0f} x {sv:.0f} px "
           f"(max pairwise {smax:.0f} px)")
     print(f"      in metres at {d_racket:.1f} m          : "
           f"{smax / overlay_calib.racket_pixel_scale()[0]:.2f} m")
-    print("      `src/fusion.py:pivot_tip` pins the wrist at the world origin, "
-          "so this\n      motion is absent from `tip` and no rigid pose can "
-          "put it back.")
+    print(f"      config.WRIST_PIVOT_COG_SCALE  : "
+          f"{config.WRIST_PIVOT_COG_SCALE:.3f}")
+    route1 = overlay_calib.wrist_cog_scale(swing, sync)
+    print(f"      route 1 (amplitude match), k re-derived : "
+          f"{route1['k']:.6f}")
+    pivot_span = float(np.linalg.norm(
+        swing.pivot.max(axis=0) - swing.pivot.min(axis=0)))
+    print(f"      pivot span                    : {pivot_span:.2f} m "
+          "(was 0.00 m, wrist pinned at the origin)")
+    print("      `src/fusion.py:wrist_pivot` now supplies this translation "
+          "via `Swing.pivot`;\n      the head in world space is `Swing.head "
+          "= pivot + tip`.")
 
     print("\n  (c) Arc-length and turning, over the window the time base gives")
     a = overlay_calib.model_vs_video_arc(swing, sync)
@@ -452,7 +471,7 @@ def main() -> int:
     _rule("VERDICT")
     R = cv2.Rodrigues(sol.rvec)[0]
     depth = (R @ corr.obj_pts.T).T[:, 2] + sol.tvec[2]
-    curve = camera.project_points(sol.camera(width, height), swing.tip)
+    curve = camera.project_points(sol.camera(width, height), swing.head)
     span = (float(np.ptp(curve[:, 0])), float(np.ptp(curve[:, 1])))
 
     hard_fail = []
@@ -473,7 +492,37 @@ def main() -> int:
             f"{overlay_calib.RECORDED_BASELINE_PX:.1f} + "
             f"{BASELINE_SLACK_PX:.0f} px slack")
 
-    print(f"  median reprojection error : {sol.median_px:.1f} px")
+    # Multi-statistic gate. The median alone is the least informative of these
+    # five numbers: modelling the wrist translation moved it 13.71 -> 15.56 px
+    # (still inside RECORDED_BASELINE_PX + slack) while the mean went
+    # 23.92 -> 16.13, the max 91.16 -> 38.88 and the inliers 11 -> 13 of 14 —
+    # a robust fit shedding two outliers at the contact frames. A median-only
+    # gate reads that correct answer as a regression, which is why these three
+    # were added rather than RECORDED_BASELINE_PX being loosened.
+    if sol.mean_px > overlay_calib.RECORDED_BASELINE_MEAN_PX + MEAN_SLACK_PX:
+        hard_fail.append(
+            f"mean {sol.mean_px:.1f} px worse than the recorded baseline "
+            f"{overlay_calib.RECORDED_BASELINE_MEAN_PX:.1f} + "
+            f"{MEAN_SLACK_PX:.0f} px slack")
+    if sol.max_px > overlay_calib.RECORDED_BASELINE_MAX_PX + MAX_SLACK_PX:
+        hard_fail.append(
+            f"max {sol.max_px:.1f} px worse than the recorded baseline "
+            f"{overlay_calib.RECORDED_BASELINE_MAX_PX:.1f} + "
+            f"{MAX_SLACK_PX:.0f} px slack")
+    n_inl = int(sol.inliers.sum())
+    if n_inl < overlay_calib.RECORDED_BASELINE_INLIERS - 1:
+        hard_fail.append(
+            f"RANSAC inliers {n_inl}/{len(sol.inliers)} below the recorded "
+            f"{overlay_calib.RECORDED_BASELINE_INLIERS} - 1")
+
+    print(f"  median reprojection error : {sol.median_px:.1f} px"
+          " (rose from 13.71 px — expected: the robust fit shedding its two "
+          "contact outliers; see mean/max/inliers below)")
+    print(f"  mean / max / inliers      : {sol.mean_px:.1f} px / "
+          f"{sol.max_px:.1f} px / {n_inl}/{len(sol.inliers)}  "
+          f"(baselines {overlay_calib.RECORDED_BASELINE_MEAN_PX:.1f} / "
+          f"{overlay_calib.RECORDED_BASELINE_MAX_PX:.1f} / "
+          f"{overlay_calib.RECORDED_BASELINE_INLIERS})")
     print(f"  acceptance target         : {TARGET_MEDIAN_PX:.0f} px  -> "
           f"{'PASS' if sol.median_px <= TARGET_MEDIAN_PX else 'BELOW TARGET'}")
     print(f"  recorded baseline         : "
@@ -493,9 +542,11 @@ def main() -> int:
               f"visibly travels {a['arc2d_observed_px']:.0f} px —\n  "
               f"{a['ratio']:.2f}x. A rigid pose can translate, rotate and "
               "scale a path; it cannot\n  change how much arc the path "
-              "contains. On top of that the pivot model pins the\n  wrist at "
-              "the origin while the real wrist crosses "
-              f"{smax_fmt(overlay_calib)} of the frame.\n  Reported, not "
+              "contains. The wrist translation is now MODELLED "
+              "(`Swing.pivot`),\n  so the remaining floor is the residual "
+              "out-of-plane orientation error (mean |delta theta|\n  18.7 deg "
+              "-> 12.3 deg, analysis §3) and the ball-contact point's "
+              "documented ~25 px\n  hand-ward bias.\n  Reported, not "
               "tuned: see the write-up in OVERLAY_FRAME.md.")
 
     if hard_fail:

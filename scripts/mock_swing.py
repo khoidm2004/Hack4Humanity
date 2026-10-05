@@ -44,8 +44,10 @@ def make_mock_swing(n: int = 400, fs: int = config.FS) -> Swing:
         q.append(r.as_quat())                              # (x,y,z,w)
     quat = np.array(q)[:, [3, 0, 1, 2]]                    # -> (w,x,y,z)
 
+    # config.RACKET_LEVER_BODY (-x), not the old [0, 0, L] +z lever PR #9
+    # retracted as a live copy of an unverified assumption.
     tip = Rotation.from_quat(quat[:, [1, 2, 3, 0]]).apply(
-        np.array([0.0, 0.0, config.RACKET_TIP_LEN]))
+        np.asarray(config.RACKET_LEVER_BODY, float) * config.RACKET_TIP_LEN)
 
     # Crude sensor path (slightly off the tip, bounded).
     cog = 0.92 * np.stack([

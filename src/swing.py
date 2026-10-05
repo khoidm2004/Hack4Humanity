@@ -31,12 +31,28 @@ class Swing:
     cog : (N, 3) float, metres
         Sensor (centre-of-gravity-ish) position in world space
         (rest-to-rest model).
+    pivot : (N, 3) float, metres
+        Wrist (pivot) position in world space, ``config.WRIST_PIVOT_COG_SCALE
+        * cog``.  Defaults to zeros, which is the pre-2026-10-05 behaviour (the
+        wrist pinned at the world origin) and is what an older ``swing.npz``
+        without this array loads as.
     gyro_deg : (N, 3) float, deg/s
         Raw gyroscope signal carried through for plotting / calibration.
     accel : (N, 3) float, m/s2
         Raw accelerometer signal carried through for plotting / metrics.
     impact_idx : int
         Sample index of the ball-contact (impact) moment.
+
+    Notes
+    -----
+    ``tip`` is the head position **relative to the pivot**, so
+    ``|tip| == config.RACKET_TIP_LEN`` exactly, for every sample, always.  The
+    head's WORLD position is ``pivot + tip`` — use the derived :attr:`head`.
+    `pivot` is a separate field rather than being folded into `tip` on purpose:
+    folding would break `scripts/verify_fusion.py`'s radius check, both of its
+    lever-direction checks, and `overlay_calib.racket_pixel_scale`'s
+    L-cancellation argument simultaneously (|tip + 0.907*cog| runs
+    0.686 -> ~1.5 m).  See Artifacts/analysis.md §9.3.
     """
 
     t: np.ndarray
@@ -46,6 +62,25 @@ class Swing:
     gyro_deg: np.ndarray
     accel: np.ndarray
     impact_idx: int
+    pivot: np.ndarray | None = None
+
+    def __post_init__(self) -> None:
+        # Zeros, not None, for every consumer downstream: `pivot + tip` then
+        # works unconditionally and an older npz with no `pivot` array loads
+        # as the pre-2026-10-05 pinned-wrist model.
+        if self.pivot is None:
+            self.pivot = np.zeros_like(np.asarray(self.tip, float))
+
+    @property
+    def head(self) -> np.ndarray:
+        """(N, 3) float, metres — racket head tip in WORLD space.
+
+        ``pivot + tip``.  Every consumer that wants the head's position on
+        screen or in the world wants THIS, not ``tip``: `tip` is the lever
+        relative to the pivot.  Exposed as a property so the sum is written
+        once instead of at seven call sites.  Cheap — one (N, 3) add.
+        """
+        return self.pivot + self.tip
 
     # ------------------------------------------------------------------ #
     # Validation
@@ -63,6 +98,7 @@ class Swing:
             ("quat", self.quat),
             ("tip", self.tip),
             ("cog", self.cog),
+            ("pivot", self.pivot),
             ("gyro_deg", self.gyro_deg),
             ("accel", self.accel),
         ):
@@ -93,6 +129,7 @@ class Swing:
             quat=self.quat,
             tip=self.tip,
             cog=self.cog,
+            pivot=self.pivot,
             gyro_deg=self.gyro_deg,
             accel=self.accel,
             impact_idx=np.int64(self.impact_idx),
@@ -114,4 +151,8 @@ class Swing:
                 gyro_deg=z["gyro_deg"],
                 accel=z["accel"],
                 impact_idx=int(z["impact_idx"]),
+                # Back-compat: an npz written before `pivot` existed has no
+                # such array.  `None` -> `__post_init__` fills zeros, i.e. the
+                # old pinned-wrist model, so old files still load.
+                pivot=(z["pivot"] if "pivot" in z else None),
             )

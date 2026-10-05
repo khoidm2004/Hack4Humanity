@@ -189,7 +189,7 @@ def build_overlay_camera(meta, opts, swing=None, impact_pixel=None,
                        zoom=opts["zoom"])
     pan_x, pan_y = opts["pan_x"], opts["pan_y"]
     if opts.get("anchor_impact") and swing is not None and impact_pixel is not None:
-        projected = camera.project_points(cam, swing.tip[swing.impact_idx])[0]
+        projected = camera.project_points(cam, swing.head[swing.impact_idx])[0]
         pan_x += float(impact_pixel[0] - projected[0])
         pan_y += float(impact_pixel[1] - projected[1])
     return camera.nudge(cam, pan_x=pan_x, pan_y=pan_y)

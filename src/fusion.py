@@ -175,13 +175,17 @@ def pivot_tip(quat: np.ndarray) -> np.ndarray:
     mean racket image-angle error of 116.7 deg across the follow-through
     (f146-220), against 9.1 deg once corrected.
 
-    The wrist/pivot is held fixed at the origin, so this path traces a sphere
-    of radius `RACKET_TIP_LEN` and carries only the ROTATIONAL part of the
-    head's motion.  The real wrist travels 366 px (~1.29 m) over f116-220
-    (§7.5) and no rigid camera pose can put that back: this is an error floor,
-    not a shape guarantee.  The previous docstring's claim that this is "the
-    overlay that always keeps the correct shape" was wrong twice over — wrong
-    axis, and wrong about the omitted translation.
+    This returns the lever ONLY — the head relative to the pivot — so
+    `|tip| == RACKET_TIP_LEN` for every sample and the path it traces is a
+    sphere of that radius.  Until 2026-10-05 that WAS the whole model: the
+    wrist sat at the world origin and the ~0.91 m it really travels across the
+    annotated window was simply absent, which PnP could only absorb by pulling
+    the camera to 55 % of the player's measured distance (|tvec| 2.400 m
+    against the L-free 4.075 m anchor).  The translation now lives in
+    `Swing.pivot` (`wrist_pivot` below) and the head is `Swing.head =
+    pivot + tip`.  Keeping them separate is what preserves this radius
+    invariant and the two lever-direction checks in
+    `scripts/verify_fusion.py`.
 
     Parameters
     ----------
@@ -195,6 +199,32 @@ def pivot_tip(quat: np.ndarray) -> np.ndarray:
     R = Rotation.from_quat(rots_yzx)
     local = np.asarray(config.RACKET_LEVER_BODY, float) * config.RACKET_TIP_LEN
     return R.apply(local)                     # (N, 3)
+
+
+def wrist_pivot(cog: np.ndarray,
+                scale: float = config.WRIST_PIVOT_COG_SCALE) -> np.ndarray:
+    """The wrist (pivot) path: ``scale * cog``.
+
+    `pivot_tip` gives the racket head RELATIVE to the wrist; this gives where
+    the wrist itself is, so the head in world space is `pivot + tip`
+    (`Swing.head`).  `rest_to_rest_cog` is the only wrist-motion estimate the
+    repo has from the data alone, and it correlates +0.914 (u) / +0.837 (v)
+    with the annotated wrist pixels (Artifacts/analysis_followthrough.md §7.5).
+    `scale` is a calibration, not a physical fraction — `cog` is detrended
+    about the origin, so its amplitude is set by the detrending.  See
+    `config.WRIST_PIVOT_COG_SCALE` for how 0.907 was measured and why the
+    held-out reads were not used to pick it.
+
+    Parameters
+    ----------
+    cog : (N, 3) float, metres — `rest_to_rest_cog` output.
+    scale : float — `config.WRIST_PIVOT_COG_SCALE`.
+
+    Returns
+    -------
+    (N, 3) float, metres.
+    """
+    return float(scale) * np.asarray(cog, float)
 
 
 def fit_centripetal_lever(accel: np.ndarray,
@@ -333,11 +363,13 @@ def reconstruct(accel: np.ndarray,
     quat = integrate_orientation(accel_lp, gyro_lp, gravity, alpha=alpha)
     tip = pivot_tip(quat)
     cog = rest_to_rest_cog(accel_lp, quat, gravity)
+    pivot = wrist_pivot(cog)
     impact_idx = detect_impact(accel_lp, gyro_lp)
 
     t = np.arange(len(accel), dtype=float) * config.DT
     swing = Swing(t=t, quat=quat, tip=tip, cog=cog,
-                  gyro_deg=gyro_deg, accel=accel, impact_idx=impact_idx)
+                  gyro_deg=gyro_deg, accel=accel, impact_idx=impact_idx,
+                  pivot=pivot)
     swing.validate()
     return swing
 

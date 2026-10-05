@@ -166,14 +166,20 @@ number — the same fitting procedure, re-run.
   arithmetic slip; the window the overlay actually uses, samples 175–225, is
   unaffected). Expected for an impact-centred capture that outlasts the clip,
   but it is the one loose end in an otherwise self-consistent picture.
-- **The pivot lever is three different numbers.** `RACKET_TIP_LEN = 0.686`
-  (butt→tip), the measured wrist→annotated-head rim 0.544 m, and the unused
-  `L_HANDLE = 0.20` implying 0.486. The sensor is on the *strings*, at a fourth,
-  undocumented distance. Deliberately left unchanged: `L` cancels exactly out of
-  the arc ratio, and changing it in one place without the other would silently
-  break that cancellation. It does affect every metric distance.
-- **`racket_pixel_scale()` reads 285 px/m** against the ball's 359 px/m —
-  exactly the 0.686/0.544 lever ratio above. Left as-is for the same reason.
+- **The pivot lever is three different numbers — RETRACTED, see §10.1.**
+  `RACKET_TIP_LEN = 0.686` (butt→tip), the measured wrist→annotated-head rim
+  0.544 m, and the unused `L_HANDLE = 0.20` implying 0.486 all looked like
+  competing lengths. They collapse: the lever is an exact gauge freedom of
+  this overlay (changing it moves no pixel, §10.1), `L_HANDLE` is dead code
+  that double-counts the wrist, and 0.544 was a `racket_pixel_scale` window
+  artifact. Measured from the real wrist the ratio is 0.977 ⇒ 0.702 m —
+  `RACKET_TIP_LEN = 0.686` is right to 2.3%. Left unchanged, same as before,
+  but for the reason in §10.1, not the one above.
+- **`racket_pixel_scale()` reads 285 px/m** against the ball's 359 px/m — this
+  looked like "exactly the 0.686/0.544 lever ratio above", but 0.544 was
+  itself produced by this function's own f116-145 window; over all 26 reads
+  it reads 375 px/m, agreeing with the ball to 4.5% (§10.1, §10.4). The
+  window bug is real and still left as-is, out of scope this round.
 - **The complementary filter was latent and broken — now DELETED.** The
   `alpha > 0` branch used to assign `_rotation_aligning(...)` to `rot_accum`,
   which *replaces* rather than blends — discarding all accumulated heading at
@@ -295,29 +301,36 @@ the real one, comparing the configured lever against
 rejected by check (B) — the permanent `[INFO]` line in `verify_fusion.py`'s
 output proves this on every run.
 
-**The wrist-translation verdict (deliverable 7).**
-`scripts/report_followthrough.py --wrist-sweep` evaluates
-`tip = k * swing.cog + tip_for_lever(quat, lever)` against the held-out reads
-for `k` in `[0.0, 0.1, 0.2, 0.3, 0.5, 0.75, 1.0]`. Only `k=0.2` clears the
-fixed rule (held-out median improves >= 20% vs `k=0`, fit-13 median worsens
-<= 2 px, mean |angle error| does not worsen): held-out median 184.1 -> 139.5
-px (24.2% better), fit-13 median 13.7 -> 12.5 px (better, not worse), mean
-|angle error| 9.1 -> 7.2 deg (better, not worse). **Per the fixed rule this
-is a VERDICT: helps (k=0.2), but it is NOT landed in this PR** — adding `cog`
-to `tip` breaks the `|tip| = RACKET_TIP_LEN` invariant that
-`verify_fusion.py`'s radius check and `racket_pixel_scale`'s L-cancellation
-argument both rest on, which is a contract change belonging in its own task.
-Reported to the coordinator as a follow-up recommendation.
+**The wrist-translation verdict (deliverable 7) — SUPERSEDED, see §10.** The
+paragraph below recommended the contract change as a follow-up; that
+follow-up is this document's own §10. Kept for history, not deleted.
 
-Visual check (`scripts/render_overlay_frames.py --frames 119 138 150 175 200
-224`, all six read): the dot sits on or very near the racket head at f119,
-f138 and f150, and close (slightly off the rim) at f175. At **f200 and f224
-the dot is visibly off the racket head** — the racket has wrapped up near
-the player's shoulder while the dot sits near the hip. This is the omitted
-wrist translation showing up visually, not a regression: the pivot model
-pins the wrist at the world origin, and the real wrist travels far enough
-by that point in the follow-through that no rigid pose can put it back (see
-the wrist-translation verdict above). Reported, not hidden.
+> `scripts/report_followthrough.py --wrist-sweep` evaluates
+> `tip = k * swing.cog + tip_for_lever(quat, lever)` against the held-out reads
+> for `k` in `[0.0, 0.1, 0.2, 0.3, 0.5, 0.75, 1.0]`. Only `k=0.2` clears the
+> fixed rule (held-out median improves >= 20% vs `k=0`, fit-13 median worsens
+> <= 2 px, mean |angle error| does not worsen): held-out median 184.1 -> 139.5
+> px (24.2% better), fit-13 median 13.7 -> 12.5 px (better, not worse), mean
+> |angle error| 9.1 -> 7.2 deg (better, not worse). **Per the fixed rule this
+> is a VERDICT: helps (k=0.2), but it is NOT landed in this PR** — adding `cog`
+> to `tip` breaks the `|tip| = RACKET_TIP_LEN` invariant that
+> `verify_fusion.py`'s radius check and `racket_pixel_scale`'s L-cancellation
+> argument both rest on, which is a contract change belonging in its own task.
+> Reported to the coordinator as a follow-up recommendation.
+
+**Visual check — SUPERSEDED by §10.6, see there for the current read.** The
+paragraph below described the state before the wrist translation landed
+(2026-10-05's task); kept for history, not deleted.
+
+> Visual check (`scripts/render_overlay_frames.py --frames 119 138 150 175 200
+> 224`, all six read): the dot sits on or very near the racket head at f119,
+> f138 and f150, and close (slightly off the rim) at f175. At **f200 and f224
+> the dot is visibly off the racket head** — the racket has wrapped up near
+> the player's shoulder while the dot sits near the hip. This is the omitted
+> wrist translation showing up visually, not a regression: the pivot model
+> pins the wrist at the world origin, and the real wrist travels far enough
+> by that point in the follow-through that no rigid pose can put it back (see
+> the wrist-translation verdict above). Reported, not hidden.
 
 ## 9. Retractions
 
@@ -347,3 +360,257 @@ full-span ratio is 0.820 against a `ratio_expected` of 0.789 — both reported
 by `scripts/report_followthrough.py` §7, neither chased by scaling anything.
 `FUSION_NOTES.md` §6's bullet is updated above to point at this instead of
 restating a single fixed target.
+
+## 10. The omitted wrist translation
+
+Task: "the racket head is still not precise", "the animated dot is affected
+when the ball contacts the racket", and "from frame 116 forward the dot is
+significantly off target" (user report, after PR #9 merged at `4553c27`).
+All three traced to one omission, below — not to `RACKET_TIP_LEN`, which an
+earlier draft of this task blamed.
+
+### 10.1 The retraction that re-scoped this task
+
+`RACKET_TIP_LEN` is an exact **gauge freedom** of this overlay.
+`pivot_tip` pinned the wrist at the origin, so `tip = L·R(t)u`. Scaling
+`L -> kL` scales the whole 3D point set about the origin, and PnP absorbs it
+exactly via `tvec -> k·tvec`: `K(R(kp) + kt) = k·K(Rp + t)` is the same
+homogeneous point, hence the same pixel, for every `k`. Measured in this
+worktree: `L = 0.470` (the length the first draft proposed) reproduces
+`L = 0.686`'s reprojection to **1.7e-13 px** over all 400 samples, and an
+L-sweep from 0.213 to 1.372 m produces only **two** distinct outcomes — the
+two RANSAC inlier sets, not a response to `L`.
+
+That falsifies the "three competing lever lengths" §6 used to list:
+`L_HANDLE = 0.20` is dead code whose own comment already reads *wrist -> grip
+end*, so subtracting it from butt -> tip double-counts the wrist; and the
+0.544/0.545 m figure was a `racket_pixel_scale` window artifact — it maxes
+over the f116-145 annotated window (195.2 px), where the racket is never
+fronto-parallel, while over all 26 reads the peak is 257.4 px at f150, giving
+375 px/m, which agrees with the ball's own 359 px/m to **4.5%**, not the 20%
+the first draft reported. Measured from the **real** (annotated) wrist rather
+than the model's pinned pivot pixel, the apparent-length ratio is 0.977 =>
+**wrist -> tip = 0.702 m**: `RACKET_TIP_LEN = 0.686` is right to 2.3%, and
+is **unchanged** by this task.
+
+### 10.2 What the old 1.46 ratio was really measuring
+
+The arc-ratio argument used the model's **pinned pivot pixel** (688.2, 406.7,
+constant for every sample) as one end of its reference vector, and the
+**annotated wrist pixel** (which moves) as the other end's observation. The
+gap between those two points is 61.5-179.3 px over the 26 annotated reads,
+median 117.9 px. The ratio was measuring that gap — the missing wrist
+translation — with `RACKET_TIP_LEN` algebraically cancelled out of it by the
+same homogeneous-point argument as §10.1. It was real, just misattributed.
+
+### 10.3 The contract change
+
+`Swing` gained a `pivot: np.ndarray | None = None` field (`src/swing.py`),
+last in the dataclass's field order (it has a default; the six fields before
+it do not) and defaulting to `np.zeros_like(tip)` in `__post_init__` — the
+pre-2026-10-05 pinned-wrist behaviour, and what an older `swing.npz` with no
+`pivot` array loads as. `tip` keeps its old meaning exactly: the head
+**relative to the pivot**, so `|tip| == RACKET_TIP_LEN` for every sample,
+unconditionally. A derived `Swing.head` property returns `pivot + tip` — the
+head's WORLD position, which is what every consumer that draws or measures
+the racket head actually wants.
+
+`pivot` was **not** folded into `tip`. Folding `k·cog` into `tip` would have
+broken, simultaneously: `verify_fusion.py`'s radius check (`|tip + 0.907·cog|`
+runs 0.686 -> ~1.5 m, not constant), both of its lever-direction checks (they
+read `tip` directly), and `overlay_calib.racket_pixel_scale`'s
+L-cancellation argument — for no benefit, since `Swing.head` gives every
+consumer the world position in one extra attribute access. Seven consumers
+were updated from `swing.tip` to `swing.head`: `overlay_calib`'s
+`build_correspondences`/`model_vs_video_arc`/`fullspan_arc_bound`,
+`camera.draw_overlay`, `plot.figure_3d`, `app.py`'s impact anchor, and
+`check_overlay_match.py`/`report_followthrough.py`'s reprojection and
+image-angle code. `scripts/verify_fusion.py` is the one deliberate holdout:
+its radius check and both lever-direction checks still read `swing.tip`,
+because `tip` — not `head` — is what those invariants are about.
+
+### 10.4 `k` — both routes, one committed
+
+`pivot = wrist_pivot(cog) = config.WRIST_PIVOT_COG_SCALE * cog`
+(`src/fusion.py`). `cog` (`rest_to_rest_cog`) is detrended about the origin,
+so its amplitude is set by that detrending, not by physics — `k` has to be
+calibrated, not assumed, and the held-out f146-220 reads must never be used
+to choose it (that is exactly the circularity `build_correspondences`'s guard
+exists to prevent).
+
+**Route 1 — amplitude matching (COMMITTED).** Scale `cog`'s max-pairwise
+displacement over the annotated window (f116-145, 258.118 px of wrist
+travel) to match the same window's `cog` displacement, using only
+fit-window reads:
+
+```
+wrist_pixel_spread()[2]            = 258.118 px   (fit reads only)
+racket_pixel_scale()[0]             = 284.611 px/m (committed value)
+  -> observed wrist travel         =   0.906914 m
+cog max-pairwise, samples 175-225  =   0.999390 m
+  -> k = 0.906914 / 0.999390        =   0.907468  -> committed 0.907
+```
+
+Declared sensitivity: `racket_pixel_scale` maxes over f116-145 only (284.6
+px/m); over all 26 reads it reads 375.2 px/m (§10.1), which would give
+`k = 0.688` instead. Both ends sit inside route 2's flat basin below.
+Widening that window is deliberately **out of scope** this round (it touches
+`racket_distance_m` and both arc ratios, and raises an unsettled question
+about using held-out reads in a reported metric) — left as-is, noted here.
+
+**Route 2 — joint PnP over the fit set (REPORTED, NOT COMMITTED).** `k` swept
+as a free parameter alongside the pose, scored on the 13 + contact
+correspondences only (held-out used purely to validate, never to choose):
+
+```
+    k     med    mean     max  inl  |tvec|   held-med   solver
+ 0.000   13.71   23.92   91.16   11   2.400     184.1    ransac+lm
+ 0.100   19.81   22.92   61.23   11   1.532     416.3    ransac+lm   <- BAD MINIMUM
+ 0.200   12.52   21.29   79.17   11   2.843     139.5    ransac+lm   <- fit-median ARGMIN, bad answer
+ 0.300   17.60   20.07   48.20   13   2.983      89.9    iterative
+ 0.400   16.61   19.05   45.90   12   3.196      70.7    iterative
+ 0.500   16.18   18.20   43.97   13   3.405      72.6    iterative
+ 0.600   15.88   17.51   42.36   13   3.612      62.3    iterative
+ 0.700   15.69   16.95   41.01   13   3.816      71.9    iterative
+ 0.750   15.63   16.71   40.42   13   3.917      76.5    iterative
+ 0.800   15.58   16.50   39.87   13   4.017      76.8    iterative
+ 0.850   15.56   16.31   39.38   13   4.118      80.1    iterative
+ 0.907   15.56   16.13   38.88   13   4.232      78.9    iterative   <- COMMITTED
+ 0.950   15.56   16.01   38.53   13   4.317      83.5    iterative
+ 1.000   15.59   15.89   38.16   13   4.417      86.7    iterative
+ 1.250   15.38   15.55   36.83   13   4.911      82.8    iterative
+ 1.500   15.11   15.50   36.36   13   5.441      74.0    iterative
+ 2.000   15.64   15.65   46.25   13   4.064      394.6    ransac+lm   <- BAD MINIMUM
+ 3.000   14.79   15.92   40.41   13   5.291      409.5    iterative   <- BAD MINIMUM, best fit median of all!
+```
+
+Mean and max fall **monotonically** out to `k = 1.5`, so the fit-only
+objective has no interior minimum — route 2 cannot identify `k` by itself,
+which is *why* route 1 is committed. `k = 0.10`, `2.0` and `3.0` are bad PnP
+minima (held-out 416 / 395 / 410 px); `k = 3.0` posts the **lowest** fit
+median of every cell tried (14.79 px) with a held-out median of 410 px — an
+argmin over the fit set is actively misleading here. What route 2 does say:
+the committed `k = 0.907` sits inside a broad flat basin (0.6-1.1, fit median
+15.55-15.69 px), which is **agreement**, not fitting. The held-out reads were
+never used to pick `k`; they are the validation in §10.5.
+
+### 10.5 Before / after, all eight numbers
+
+| statistic | k=0 (before) | k=0.907 (committed) | criterion | bar | verdict |
+|---|---|---|---|---|---|
+| fit median (px) | 13.71 | 15.56 | 3 | mean/max/inliers, not median alone | rose — expected, see below |
+| fit mean (px) | 23.92 | 16.13 | 3 | improve | PASS |
+| fit max (px) | 91.16 | 38.88 | 3 | improve | PASS |
+| RANSAC inliers | 11/14 | 13/14 | 3 | improve | PASS |
+| held-out median (px) | 184.1 | 78.9 | 1 | <= 100 px | PASS |
+| mean \|image-angle error\| (deg) | 9.1 | 8.5 | 5 | <= 9.1 deg | PASS |
+| \|tvec\| (m) | 2.400 | 4.232 | 2 | 3.5-4.6 m (anchor 4.075) | PASS |
+| ratio A (pinned/projected pivot tail) | 1.460 | 0.982 | 4 | \|A-1\| <= 0.10 | PASS |
+| ratio B (real-wrist tail) | 0.998 | 1.056 | — | near 1 (sanity) | OK |
+
+The **median rising** 13.71 -> 15.56 px is the robust fit shedding its two
+worst outliers, both at ball contact: f130 head 91.2 -> 38.9 px, the ball
+contact itself 72.8 -> 22.2 px. Every other statistic improves sharply. This
+is why acceptance criterion 3 was rewritten as a multi-statistic gate
+(`overlay_calib.RECORDED_BASELINE_MEAN_PX = 16.2`, `_MAX_PX = 39.0`,
+`_INLIERS = 13`, each tightened the same way `RECORDED_BASELINE_PX` was in
+PR #9) rather than `RECORDED_BASELINE_PX` itself being loosened:
+`RECORDED_BASELINE_PX` is still literally `13.7` and `BASELINE_SLACK_PX` is
+still `10.0` — 15.56 still passes that original gate (15.56 < 23.7) — the new
+gates catch what the median alone would hide.
+
+All nine numbers above are reproduced verbatim by
+`scripts/report_followthrough.py` (the committed run and `--k 0`) and
+`scripts/check_overlay_match.py`, run after `scripts/verify_fusion.py`
+regenerated `data/outputs/swing.npz` in a separate process (the
+`solved_pose` `lru_cache` trap — see Known traps).
+
+### 10.6 The IMPACT-ring fix
+
+`src/camera.py:draw_overlay` drew the IMPACT ring at a fixed 12 px radius,
+the same as the animated dot's white ring. `impact_idx = 199` maps to
+`frame_exact 130.13`, and the animated dot at f130 **is** sample 199 — so at
+exactly that frame the two 12 px rings were **exactly concentric** (measured
+0.0 px apart), and the dot's white ring, drawn second, overdrew the blue
+IMPACT ring. That is the "when the ball contacts the racket, the animated
+dot is affected" symptom: a marker **changing appearance**, not moving — pure
+rendering, zero geometric content. The fix enlarges the IMPACT ring to 22 px
+(radius only; its true projected centre and the "IMPACT" label offset are
+unchanged) so the dot stays legible inside it at every frame, including f130.
+Confirmed visually in `Artifacts/overlay_evidence/after_render_f130.png` and
+`app_pivot_f130.png`: a 12 px white-ringed red dot sits visibly inside a 22
+px blue ring at f130, two distinguishable markers.
+
+Recorded, not fixed: `impact_idx = 199` (frame_exact 130.13) disagrees with
+`CONTACT_FRAME_EXACT = 130.70344` by 0.58 frames (2.4 ms) — `impact_idx` is
+detected from the gyro/jerk peak, `CONTACT_FRAME_EXACT` from the video ball
+track, and they need not agree exactly. Left as an open item.
+
+At f200/f224 (`Artifacts/overlay_evidence/after_render_f200.png`,
+`after_render_f224.png`, `app_pivot_f200.png`, `app_pivot_f224.png`, all
+read): the dot now sits close to the racket head up near the player's
+shoulder through the follow-through, rather than off near the hip as in the
+pre-pivot renders §8 described (superseded there, not deleted). This is the
+wrist translation showing up visually, matching §10.5's held-out numbers.
+
+### 10.7 Two consequences to be honest about
+
+(a) `overlay_calib.model_vs_video_arc`'s `ratio_expected` (0.642 annotated
+window, 0.789 full span) was the bound for a model whose pivot **could not
+move** — `pivot_tip` alone produces only the rotational part of the head's
+motion, so 1.0 was unreachable by construction. With `Swing.pivot` modelling
+the translation, the target genuinely **is** 1.0, and the measured ratio
+moved 0.540 -> **0.904** (annotated window) and 0.820 -> **1.319** (full
+span, now overshooting). The dict key name (`ratio_expected`) is kept for
+continuity with existing callers and this document's own history; its
+meaning has changed, documented at the three sites in `src/overlay_calib.py`
+that print or compute it.
+
+(b) `racket_pixel_scale`'s L-cancellation argument — that `L` divides out of
+the arc ratio exactly — is now only **partial**: `arc3d` is `L·(rotational
+arc) + (pivot arc)`, and `pivot` does not scale with `L`, so the old exact
+cancellation only holds in the `pivot = 0` limit. A side effect: `L` becomes
+*weakly* identifiable from the ratio once pivot is in play (not from
+reprojection — PnP still absorbs any `L` exactly via `tvec`, §10.1 still
+holds there). At the committed `k = 0.907`, the fit median moves only
+15.17 -> 16.13 px across `L = 0.40-1.00` m while the ratio moves
+0.901 -> 1.143, landing at ratio = 1.000 around **L ~= 0.60-0.69 m** —
+consistent with §10.1's independent 0.702 m. Not acted on; `RACKET_TIP_LEN`
+is unchanged.
+
+### 10.8 Two stale numbers, checked against what is actually on disk
+
+TASK deliverable 7 asked this task to correct two stale numbers. Checked,
+not assumed:
+
+(i) **"366 px ~= 1.285 m" full-span wrist travel** — already corrected in
+this worktree before this task started: §9's final paragraph above already
+states the measured 302.7 px and explains the 366 figure was a bounding-box
+diagonal, not a pairwise maximum. The only place the 366 figure still
+appeared was `overlay_calib.fullspan_arc_bound`'s own docstring, which this
+task fixed to read 302.7 px (§5d of the implementation).
+
+(ii) **`|tvec| = 1.63 m`** — `grep -rn "1\.63"` over every `*.md`/`*.py` in
+the repo returns four hits, and all four are the `cog` **span** (1.633 m),
+which is correct and unrelated to `|tvec|`. There is no stale `|tvec| = 1.63`
+anywhere on disk; TASK's figure traced to a stale draft, not to committed
+text. The genuinely stale distance figure is `OVERLAY_FRAME.md:165`'s
+"2.96 m (solved)", in a historical before/after table from before PR #9's
+lever-axis fix — noted here as **superseded** by this task's `|tvec| =
+4.232 m`, rather than rewritten in place (that table documents its own
+point in history, same policy as §9's retractions above).
+
+### 10.9 Still out of scope, carried forward
+
+- `racket_pixel_scale`'s f116-145 window (§10.1, §10.4) — resolves the ball
+  cross-check from 20% to 4.5% and would move `k` from 0.907 to 0.688; left
+  unfixed, both values sit inside route 2's basin.
+- `CALIB_FOV_DEG = 60` — FOV 80/90/100 give fit medians 10.63/10.82/11.90 px
+  against 60's 13.71; a broad shallow basin, not flat, so ratio A (§10.5) is
+  not 100% attributable to `k` alone.
+- PR #9's Evidence A is weaker than written: with `r_true` exactly along
+  `-x`, the centripetal-only fit (`fusion.fit_centripetal_lever`) can return
+  axes 15-64 deg off because it omits `alpha x r`, so `verify_fusion.py`'s
+  40 deg check rests on an estimator whose own axis error can exceed 40 deg.
+  The axis conclusion survives on Evidences B and C, which are independent
+  of this estimator. **Not contrary evidence — the axis is not reopened.**
