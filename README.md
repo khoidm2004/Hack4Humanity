@@ -88,10 +88,13 @@ gravity direction (weight `alpha`; default `0.0` = pure gyro integration).
 
 ### 3. Racket-head path (pivot model) — `pivot_tip`
 ```
-tip(t) = R(t) · [0, 0, L] ,   L = RACKET_TIP_LEN = 0.686 m
+tip(t) = R(t) · (L · RACKET_LEVER_BODY) ,   L = RACKET_TIP_LEN = 0.686 m
+                                            RACKET_LEVER_BODY = (-1, 0, 0), measured
 ```
-The wrist is assumed nearly fixed, so the head tip traces the surface of a
-sphere of radius `L` around the wrist — the primary overlay curve.
+`RACKET_LEVER_BODY` is a measured unit vector in sensor axes (not assumed) —
+see `config.RACKET_LEVER_BODY` and `FUSION_NOTES.md` §8. The wrist is assumed
+nearly fixed, so the head tip traces the surface of a sphere of radius `L`
+around the wrist — the primary overlay curve.
 
 ### 4. Sensor path (rest-to-rest) — `rest_to_rest_cog`
 ```

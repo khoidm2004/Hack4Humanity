@@ -6,7 +6,8 @@ Implements the full IMU → 3D reconstruction chain:
 2. Orientation from gyroscope integration (quaternion) with a
    complementary filter that nudges roll/pitch toward the accel-measured
    gravity (SciPy ``Rotation``).
-3. Pivot model translation: ``tip = pivot + R(t) @ [0, 0, L]``  (MAIN overlay).
+3. Pivot model translation: ``tip = pivot + R(t) @ (L * RACKET_LEVER_BODY)``
+   (MAIN overlay).
 4. Rest-to-rest translation: double integration of gravity-free accel with
    drift correction (high-pass + detrend) — the "from data" proof.
 5. Impact (ball contact) detection via |gyro| peak + jerk spike.
@@ -30,8 +31,16 @@ from .swing import Swing
 def estimate_gravity(accel: np.ndarray) -> np.ndarray:
     """Estimate the sensor-frame gravity vector.
 
-    With no guaranteed static segment we take the mean of the early, most
-    static samples and normalise it to the expected magnitude ``g``.
+    There is no static segment anywhere in this record: samples 0-24 carry
+    |gyro| = 113 deg/s and |accel| = 7.48 m/s2 (0.76 g), and the quietest
+    25-sample window in all 400 IS s0-24, at the same 113 deg/s
+    (Artifacts/analysis.md §6).  So this is the least-moving window, not a
+    static one, normalised to the expected magnitude `g`.  With
+    `COMP_FILTER_ALPHA = 0.0` its only effect on `quat`/`tip` is the initial
+    orientation `q0`, a pure LEFT multiplication, so it rotates the whole
+    path rigidly.  Gyro bias removal was also tried and REJECTED: subtracting
+    the s0-24 mean improves the fit-13 median to 17.0 px but degrades the
+    held-out median to 329 px — that "bias" is the takeback, not a bias.
 
     Parameters
     ----------
@@ -51,21 +60,6 @@ def estimate_gravity(accel: np.ndarray) -> np.ndarray:
 # --------------------------------------------------------------------------- #
 # 2. Orientation
 # --------------------------------------------------------------------------- #
-def _complementary_gravity(dir_world: np.ndarray, expected: np.ndarray,
-                           alpha: float) -> np.ndarray:
-    """Blend the world-space measured gravity direction toward the ideal
-    ``[0, 0, -1]`` by rotating by ``alpha`` fraction of the angular error."""
-    dir_world = dir_world / (np.linalg.norm(dir_world) + 1e-9)
-    expected = expected / (np.linalg.norm(expected) + 1e-9)
-    # --- rotation that takes dir_world -> expected ------------------------- #
-    cross = np.cross(dir_world, expected)
-    dot = np.clip(np.dot(dir_world, expected), -1.0, 1.0)
-    axis = cross / (np.linalg.norm(cross) + 1e-9)
-    angle = np.arccos(dot)
-    corr = Rotation.from_rotvec(axis * (angle * alpha))
-    return corr.apply(dir_world)
-
-
 def integrate_orientation(accel: np.ndarray,
                           gyro_deg: np.ndarray,
                           gravity: np.ndarray,
@@ -80,13 +74,26 @@ def integrate_orientation(accel: np.ndarray,
     gyro_deg : (N, 3) float, deg/s
     gravity : (3,) float, sensor-frame gravity estimate
     alpha : float
-        Complementary weight applied to the accel-based roll/pitch correction.
-        ``0.0`` == pure gyro integration.
+        Must be ``0.0`` — pure gyro integration.  The complementary-filter
+        branch that used to accept a nonzero value here was DELETED, not
+        fixed: see the `NotImplementedError` raised below and
+        `config.COMP_FILTER_ALPHA`.
 
     Returns
     -------
     (N, 4) float — world orientation as w,x,y,z quaternions.
     """
+    if alpha != 0.0:
+        raise NotImplementedError(
+            "COMP_FILTER_ALPHA must be 0.0. The complementary-filter branch "
+            "that used to live here was DELETED, not fixed: it ended "
+            "`rot_accum = _rotation_aligning(g_sensor, g_world)`, which "
+            "replaced the integrated attitude with a gravity-only one and "
+            "carried ZERO heading (measured: seed 137 deg of heading, run the "
+            "branch, the component about gravity comes out 0.0000 deg). It "
+            "was also worse end to end at every alpha tried. See "
+            "config.COMP_FILTER_ALPHA and Artifacts/analysis.md §6."
+        )
     # Initialize world orientation so sensor gravity maps to world "down".
     g_sensor = gravity / (np.linalg.norm(gravity) + 1e-9)
     q0 = _align_to_gravity(g_sensor)
@@ -124,15 +131,6 @@ def integrate_orientation(accel: np.ndarray,
         # frame's 5.113 m / 806 deg, i.e. the comment described the worse
         # option.  Code was right, comment was wrong.
 
-        if alpha > 0.0:
-            # Measured gravity direction in world frame = R @ g_sensor.
-            g_world = rot_accum.apply(gravity)
-            g_world = _complementary_gravity(g_world, np.array([0.0, 0.0, -config.G]),
-                                             alpha)
-            # Recover the rotation that aligns sensor gravity with this
-            # corrected world gravity.
-            rot_accum = _rotation_aligning(g_sensor, g_world)
-
         quats[i] = rot_accum.as_quat()  # (x,y,z,w) -> convert below
 
     # scipy as_quat order is (x,y,z,w); contract stores (w,x,y,z).
@@ -165,10 +163,25 @@ def _rotation_aligning(vec_a: np.ndarray, vec_b: np.ndarray) -> Rotation:
 def pivot_tip(quat: np.ndarray) -> np.ndarray:
     """Racket head-tip position in world space using the pivot (wrist) model.
 
-    ``tip(t) = pivot + R(t) @ [0, 0, L]``.  The wrist/pivot is held fixed at
-    the origin (the camera calibration handles its world offset), so the path
-    traces the fixed-|radius| spherical surface — this is the overlay that
-    always keeps the correct shape.
+    ``tip(t) = pivot + R(t) @ (RACKET_TIP_LEN * RACKET_LEVER_BODY)``.
+
+    The lever direction is `config.RACKET_LEVER_BODY`, a MEASURED unit vector
+    in sensor axes, currently -x.  Until 2026-10-05 this function hard-coded
+    `[0, 0, L]` — the racket along the sensor's +z — which was an unverified
+    assumption inherited from PLAN.md, not a measurement.  The accelerometer's
+    own centripetal signal and a held-out video grid search independently put
+    the racket ~90 deg away from that, along -x; see `config.RACKET_LEVER_BODY`
+    and Artifacts/analysis.md §7.  The consequence of the wrong axis was a
+    mean racket image-angle error of 116.7 deg across the follow-through
+    (f146-220), against 9.1 deg once corrected.
+
+    The wrist/pivot is held fixed at the origin, so this path traces a sphere
+    of radius `RACKET_TIP_LEN` and carries only the ROTATIONAL part of the
+    head's motion.  The real wrist travels 366 px (~1.29 m) over f116-220
+    (§7.5) and no rigid camera pose can put that back: this is an error floor,
+    not a shape guarantee.  The previous docstring's claim that this is "the
+    overlay that always keeps the correct shape" was wrong twice over — wrong
+    axis, and wrong about the omitted translation.
 
     Parameters
     ----------
@@ -176,12 +189,74 @@ def pivot_tip(quat: np.ndarray) -> np.ndarray:
 
     Returns
     -------
-    (N, 3) float, metres
+    (N, 3) float, metres — |tip| == RACKET_TIP_LEN for every sample.
     """
     rots_yzx = quat[:, [1, 2, 3, 0]]          # back to (x,y,z,w)
     R = Rotation.from_quat(rots_yzx)
-    local = np.array([0.0, 0.0, config.RACKET_TIP_LEN])
+    local = np.asarray(config.RACKET_LEVER_BODY, float) * config.RACKET_TIP_LEN
     return R.apply(local)                     # (N, 3)
+
+
+def fit_centripetal_lever(accel: np.ndarray,
+                          gyro_deg: np.ndarray,
+                          lo: int = 205,
+                          hi: int | None = None,
+                          omega_min_dps: float = 0.0,
+                          ) -> tuple[np.ndarray, float, np.ndarray, int]:
+    """Fit the sensor's body-frame lever from its own centripetal signal.
+
+    A sensor at body-frame position ``r`` from the rotation centre reads a
+    specific force ``f = (w w^T - |w|^2 I) r + b``, which is LINEAR in ``r``
+    — so ``r`` comes straight out of a least-squares fit, with no camera, no
+    annotations and no fusion output involved.  ``b`` absorbs gravity and
+    bias.  This is the measurement behind `config.RACKET_LEVER_BODY`, and
+    `scripts/verify_fusion.py` turns it into a regression check that the
+    configured lever still agrees with the data (Artifacts/analysis.md §7.1).
+
+    The angular-acceleration term ``alpha x r`` is deliberately NOT modelled:
+    the fit is used as an AXIS estimate with a 40 deg tolerance, and three
+    independent windows already agree to within 20 deg without it.
+
+    Samples where any accel axis has hard-clipped at the part's +/-16 g full
+    scale are excluded (`ax` sits on the rail for samples 182-199).
+
+    Parameters
+    ----------
+    accel : (N, 3) float, m/s2 — RAW, as `load.to_signal_arrays` returns it.
+    gyro_deg : (N, 3) float, deg/s — RAW.
+    lo, hi : int — half-open sample window [lo, hi).  The default starts at
+        205 because that window is entirely clear of the clip plateau and
+        carries the highest |w|.
+    omega_min_dps : float — optional |w| floor, deg/s.
+
+    Returns
+    -------
+    (unit_dir, radius_m, bias, n_used)
+        ``unit_dir`` is ``r / |r|``; ``radius_m`` is ``|r|``.
+    """
+    a = np.asarray(accel, float)
+    w = np.deg2rad(np.asarray(gyro_deg, float))
+    n = len(a)
+    hi = n if hi is None else int(hi)
+    rail = config.ACCEL_FULL_SCALE_G - 0.06          # 15.94 g
+    unclipped = ~((np.abs(a) / config.G) >= rail).any(axis=1)
+    idx = np.arange(n)
+    sel = (unclipped & (idx >= int(lo)) & (idx < hi)
+           & (np.linalg.norm(w, axis=1) >= np.deg2rad(omega_min_dps)))
+    k = np.flatnonzero(sel)
+    if len(k) < 20:
+        raise ValueError(f"centripetal fit needs >=20 usable samples, got {len(k)}")
+    eye = np.eye(3)
+    rows = [np.hstack([np.outer(w[i], w[i]) - float(w[i] @ w[i]) * eye, eye])
+            for i in k]
+    A = np.vstack(rows)                  # (3m, 6)
+    y = a[k].reshape(-1)                 # (3m,) — C-order matches the row blocks
+    x, *_ = np.linalg.lstsq(A, y, rcond=None)
+    r = x[:3]
+    norm = float(np.linalg.norm(r))
+    if norm < 1e-9:
+        raise ValueError("centripetal fit returned a degenerate radius")
+    return r / norm, norm, x[3:], int(len(k))
 
 
 # --------------------------------------------------------------------------- #

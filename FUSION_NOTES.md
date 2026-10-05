@@ -150,13 +150,13 @@ number — the same fitting procedure, re-run.
 
 ## 6. What is still wrong
 
-- **Arc ratio 0.51 against an expected 0.64.** 0.64 — not 1.0 — is what a
-  *correct* wrist-pinned pivot model should give, because `pivot_tip` holds the
-  wrist at the origin and the repo has measured 258 px (~0.72 m) of wrist travel
-  it structurally cannot represent. The remaining ~20 % is, by measured size:
-  the post-impact excursion-and-return (`Artifacts/analysis.md` §4.5), the
-  13-point annotation polyline's own undercount of the observed arc, and the
-  pivot really being a point on a translating forearm.
+- **Arc ratio 0.51 against an expected 0.64 — RETRACTED.** 0.64 was computed
+  from the *annotated-window* (f116-145) wrist spread (258 px) only. Over the
+  full follow-through f116-220 the wrist travels much further — see §8/§9 for
+  the measured figure and why the true number is "not a fixed 0.64" but a bound
+  that depends on which window you ask about. `overlay_calib.fullspan_arc_bound`
+  now reports the full-span figure alongside `model_vs_video_arc`'s
+  annotated-window one; neither is to be chased by scaling anything.
 - **`FS = 416` is still an assumption**, never measured — there is no static
   segment in the record to calibrate against (`|a|` over samples 0–24 averages
   0.763 g, not 1.000). At 240 fps capture the 400-sample record extends past
@@ -174,11 +174,13 @@ number — the same fitting procedure, re-run.
   break that cancellation. It does affect every metric distance.
 - **`racket_pixel_scale()` reads 285 px/m** against the ball's 359 px/m —
   exactly the 0.686/0.544 lever ratio above. Left as-is for the same reason.
-- **The complementary filter is latent and broken.** The `alpha > 0` branch
-  (`src/fusion.py:108-115`) assigns `_rotation_aligning(...)` to `rot_accum`,
-  which *replaces* rather than blends — discarding all accumulated yaw at every
-  sample. Dead at `COMP_FILTER_ALPHA = 0.0`. Not touched; do not enable it
-  without rewriting it.
+- **The complementary filter was latent and broken — now DELETED.** The
+  `alpha > 0` branch used to assign `_rotation_aligning(...)` to `rot_accum`,
+  which *replaces* rather than blends — discarding all accumulated heading at
+  every sample (measured: seed 137 deg of heading, run the branch, the
+  component about gravity comes out 0.0000 deg). It has been removed from
+  `src/fusion.py:integrate_orientation`, which now raises `NotImplementedError`
+  on any nonzero `alpha` instead of silently destroying heading. See §8.
 - **`metrics.peak_gforce` now reads ~16.7 g** where it used to read ~2.1 g. That
   is the unit fix landing, not a regression.
 
@@ -195,3 +197,153 @@ number — the same fitting procedure, re-run.
 - `OVERLAY_FRAME.md` — superseding note. Its arc-mismatch argument and its
   `corr(world +Z, observed head v)` reasoning were both read off a
   reconstruction built on a scrambled `q0` and a 1.0× time base.
+
+## 8. The racket lever pointed down the wrong body axis
+
+`src/fusion.py:pivot_tip` built the racket lever as
+`local = np.array([0.0, 0.0, config.RACKET_TIP_LEN])` — asserting the racket
+points along the sensor's **+z** axis. Nothing in the repo ever measured that;
+it was an assumption inherited from `PLAN.md`, and the sensor is taped to the
+string bed, so its axes are set by how it was taped, not by any physical law.
+
+**Evidence it is wrong, and what it actually is.** The accelerometer's own
+centripetal signal is an independent measurement with no camera involved: a
+sensor at body-frame radius `r` reads `f = (ww^T - |w|^2 I) r + b`, linear in
+`r`. Least-squares fits over three different sample windows
+(`fusion.fit_centripetal_lever`, Artifacts/analysis.md §7.1) land at:
+
+| window | `|r|` (m) | unit direction | angle from +z |
+|---|---|---|---|
+| post-impact 205-399 | 0.213 | `[-0.997 +0.039 +0.061]` | 86.5 deg |
+| all unclipped | 0.285 | `[-0.970 -0.065 -0.234]` | 103.5 deg |
+| high-omega unclipped | 0.189 | `[-0.957 -0.251 -0.145]` | ~82-90 deg |
+
+Every window is within ~15-20 deg of **-x** and ~90 deg off the modelled +z.
+The three windows' off-axis components point in three *different* directions
+(+z-ish, -z-ish, -y-ish) rather than agreeing on a consistent lean, which is
+why the committed lever is **clean -x** (`config.RACKET_LEVER_BODY = (-1, 0,
+0)`) rather than the slightly oblique direction any single window's raw fit
+would suggest — a genuinely oblique mount would make the windows agree on
+*which way* it leans, and they do not.
+
+A held-out video grid search (pose fitted on the 13 committed annotations
+only, scored on racket image-angle against the f146-220 reads, analysis
+§7.2) optimises at `[-0.981, +0.173, +0.087]` — 11 deg from the committed
+-x and 8 deg from the accelerometer's post-impact answer — **independent
+confirmation from a channel the accelerometer fit never saw**. Its optimum
+was deliberately **not** adopted: committing the direction that scores best
+on the held-out set would be fitting to it and would destroy its value as
+independent evidence (it also scores 5.3 deg mean image-angle error against
+10.1 deg for pure -x, which is the price of that choice, paid knowingly).
+
+**Measured before/after** (this worktree, `scripts/report_followthrough.py`
+and `scripts/check_overlay_match.py`; analysis's own pre-fix figures in
+parentheses where they differ):
+
+| quantity | before (`+z`) | after (`-x`, committed) |
+|---|---|---|
+| fit-13+contact reprojection median | 21.1 px (analysis: 23.7) | 13.7 px (analysis: 12.9) |
+| held-out f146-220 median | 297.9 px (analysis: 324) | 184.1 px (analysis: 184 — exact) |
+| mean racket image-angle error, f146-220 | 114.4 deg (analysis: 116.7) | 9.1 deg (analysis: 9.1 — exact) |
+| windowed extent f116-145 | 552 x 301 px (analysis: 546x272) | 565 x 306 px (analysis: 565x306 — exact) |
+| annotated-window arc ratio | 0.509 (exact match) | 0.540 (exact match) |
+| in-frame over f112-225 | 100% | 100% (not evidence of the fix — see below) |
+
+`check_overlay_match.py`'s median (13.7 px) replaced the recorded baseline:
+`overlay_calib.RECORDED_BASELINE_PX` tightened **21.5 -> 13.7**, never
+loosened; `BASELINE_SLACK_PX` stayed `10.0`.
+
+**Criterion 1 is not evidence the fix worked.** Both the `+z` and `-x` levers
+stay 100% in-frame over f112-225 — the runaway that leaves the frame under
+`+z` does so around f232, past this clip's last frame (225). The fix is
+visible in criteria 4-6, not 1.
+
+**Criterion 2, measured honestly.** `scripts/report_followthrough.py` prints
+`step[f] = |proj[f] - proj[f-1]|`, the literal single-video-frame projected
+step. By that definition the `-x` lever already settles under 15 px/frame
+starting at f180 and is at 3.7 px/frame by f212 (f204=6.6, f208=5.2,
+f212=3.7, f216=2.3, f220=1.1, f224=0.7). This differs substantially from
+`Artifacts/analysis.md` §7.4's reported "30.0 px/frame at f208" / "10.4 at
+f220": the projected `(u,v)` positions this script reproduces at those exact
+frames match analysis's table to 0.1 px, so the trajectory and pose are not
+in question — only the step metric is computed differently (analysis's
+table rows are 12-18 video frames apart, and its "step" column is closer to
+the point-to-point distance between those sparse rows than to a true
+single-frame derivative). Reported as measured, not reconciled further;
+either way the lever fix passes criterion 2 by a wide margin.
+
+**The `alpha > 0` branch — deleted, not fixed.** It ended
+`rot_accum = _rotation_aligning(g_sensor, g_world)`, which *replaces* the
+integrated attitude instead of blending into it: `_rotation_aligning` returns
+the minimal rotation between two vectors, so its axis is perpendicular to
+gravity by construction and carries zero heading. Measured: seed 137 deg of
+pure heading, run the branch, and the component about gravity comes out
+0.0000 deg. `src/fusion.py:integrate_orientation` now raises
+`NotImplementedError` on any nonzero `alpha` instead of leaving this as a
+silent loaded gun. Not rewritten: there is no static window anywhere in this
+record to validate a gravity correction against, and every alpha measured
+end-to-end was worse than `alpha=0.0` (0.01 -> 33.4 px fit / 429 px held-out;
+0.05 -> 28.9 / 270; 0.4 -> 24.7 / 277; 0.002 -> pose rejected outright).
+
+**Direction-sensitive checks.** `scripts/verify_fusion.py` gained two: (A) a
+consistency check reading the lever back out of `tip`/`quat` — honestly
+documented as **not** the check that would have caught the original bug
+(with the old hard-coded literal it would have been tautological); and (B)
+the real one, comparing the configured lever against
+`fusion.fit_centripetal_lever`'s axis (sign-free, <= 40 deg). The pre-fix
+`+z` lever scores 86.5 deg against the same fit and would have been
+rejected by check (B) — the permanent `[INFO]` line in `verify_fusion.py`'s
+output proves this on every run.
+
+**The wrist-translation verdict (deliverable 7).**
+`scripts/report_followthrough.py --wrist-sweep` evaluates
+`tip = k * swing.cog + tip_for_lever(quat, lever)` against the held-out reads
+for `k` in `[0.0, 0.1, 0.2, 0.3, 0.5, 0.75, 1.0]`. Only `k=0.2` clears the
+fixed rule (held-out median improves >= 20% vs `k=0`, fit-13 median worsens
+<= 2 px, mean |angle error| does not worsen): held-out median 184.1 -> 139.5
+px (24.2% better), fit-13 median 13.7 -> 12.5 px (better, not worse), mean
+|angle error| 9.1 -> 7.2 deg (better, not worse). **Per the fixed rule this
+is a VERDICT: helps (k=0.2), but it is NOT landed in this PR** — adding `cog`
+to `tip` breaks the `|tip| = RACKET_TIP_LEN` invariant that
+`verify_fusion.py`'s radius check and `racket_pixel_scale`'s L-cancellation
+argument both rest on, which is a contract change belonging in its own task.
+Reported to the coordinator as a follow-up recommendation.
+
+Visual check (`scripts/render_overlay_frames.py --frames 119 138 150 175 200
+224`, all six read): the dot sits on or very near the racket head at f119,
+f138 and f150, and close (slightly off the rim) at f175. At **f200 and f224
+the dot is visibly off the racket head** — the racket has wrapped up near
+the player's shoulder while the dot sits near the hip. This is the omitted
+wrist translation showing up visually, not a regression: the pivot model
+pins the wrist at the world origin, and the real wrist travels far enough
+by that point in the follow-through that no rigid pose can put it back (see
+the wrist-translation verdict above). Reported, not hidden.
+
+## 9. Retractions
+
+Four claims from an earlier draft of the task, falsified by direct
+measurement in this worktree (`Artifacts/analysis.md`):
+
+| retracted claim | correction |
+|---|---|
+| "a retrace is not what a camera error looks like" | **FALSE.** The real racket head retraces **530 px leftward** over f150-212 (`Artifacts/analysis.md` §3). A reversal-free path over that span is *wrong*. |
+| "the post-impact gyro is string ringing, so integrating it is the bug" | **FALSE.** 65% of post-impact gyro energy is below 5 Hz and only 5.4% above 100 Hz, where the ~165 Hz string band lives; `reconstruct` already low-passes the fusion inputs at 25 Hz. With the lever corrected, that same gyro reproduces the real racket orientation to 9.1 deg over the whole 0.96 s record, through a 16 g clipped impact, with zero gravity correction (§4, §7.3). |
+| "samples 180-199 are dead linear, possibly synthetic data" | **FALSE.** Genuine LSM6DSOX output. Gyro values sit on the part's exact 0.07 deg/s LSB grid (1164/1200 to <1e-4; the 36 that miss are off by <=1.4e-3, the CSV's 2-decimal rounding) and accel on its 0.488 mg grid — the ST sensitivities at +/-2000 dps / +/-16 g exactly, which interpolated samples would not hit. The 2nd-difference noise floor is 0.23-0.25 deg/s over s0-59 against a datasheet prediction of 0.19. Per-axis nothing is linear; the "constant +41.6" is the flat top of a sigmoid's derivative (§5). |
+| "re-enable `COMP_FILTER_ALPHA` to bound drift" | **FALSE as a fix.** Worse at every alpha measured, and the branch itself carried zero heading. It is now deleted (§6, §8). |
+
+Also retracted: this note's own §6 claim **"arc ratio 0.51 against an
+expected 0.64."** 0.64 was computed from the *annotated-window* (f116-145)
+wrist spread (258 px) only; it says nothing about the follow-through. Over
+the fuller f116-220 span the measured max-pairwise wrist excursion is 302.7
+px (`overlay_calib.fullspan_arc_bound`'s `wrist_max_px`, this worktree) —
+**not** the ~366 px figure an earlier analysis pass quoted for the same
+span, which on inspection was the image-plane bounding-box diagonal
+(`max - min` per axis, then combined) rather than a true pairwise maximum
+over all point pairs; the two are different quantities and happen to differ
+here by about 20%. `fullspan_arc_bound` computes the literal pairwise
+maximum, as its own docstring specifies, so this is a correction to the
+analysis's arithmetic, not a code change. Using the measured 302.7 px, the
+full-span ratio is 0.820 against a `ratio_expected` of 0.789 — both reported
+by `scripts/report_followthrough.py` §7, neither chased by scaling anything.
+`FUSION_NOTES.md` §6's bullet is updated above to point at this instead of
+restating a single fixed target.
