@@ -119,6 +119,81 @@ WRIST_PX_ANGLE_1: dict[int, tuple[float, float]] = {
 }
 
 # --------------------------------------------------------------------------- #
+# PRE-116 VALIDATION SET — f90-115.  **NEVER FED TO solvePnP by default.**
+# --------------------------------------------------------------------------- #
+# Provenance
+# ----------
+# Video     : data/video/swing_angle_1.mp4 (1280x720), the TAKEBACK/DOWNSWING,
+#             which neither the fit set (f116-145) nor the held-out set
+#             (f146-220) covers at all.
+# Date read : 2026-10-06, Artifacts/analysis.md §2.
+# Method    : `scripts/dump_swing_frames.dump` with ONE FIXED crop geometry for
+#             every frame — `region=200,380,420,240`, `zoom=3` — grid labelled
+#             in original frame pixels, minor lines every 50 px; each frame also
+#             read a second time off a 2x auto-bbox `--chroma` crop and its
+#             frame-difference panel.  Same far-outer-rim convention as
+#             RACKET_HEAD_PX_ANGLE_1; mid-streak where motion-blurred.
+# Cross-checks: (a) monotone progression, 7-28 px per 2-frame step, no outlier;
+#             (b) continuity with the committed f116 read — f115 head (405,588)
+#             vs f116 (420,595), delta (15,7) against the model's own f115->f116
+#             step of (13.6,11.9); (c) apparent length |head-wrist| stays
+#             186-209 px across all 14.
+# Uncertainty: +/-15 px on f94-115, +/-25 px on f90/f92 (blurred streak, head
+#             top edge clipped by the court line).
+#
+# WHY A SEPARATE DICT, not appended to RACKET_HEAD_PX_ANGLE_1 / WRIST_PX_ANGLE_1.
+# `racket_pixel_scale` maxes |head - wrist| over those two dicts and
+# `wrist_cog_scale` takes its `cog` window from `sorted(RACKET_HEAD_PX_ANGLE_1)`,
+# so appending these 14 frames moves route-1 `k` from 0.9075 to 1.1243 purely as
+# a side effect, and `racket_distance_m`, `model_vs_video_arc` and
+# `fullspan_arc_bound` with it (Artifacts/analysis.md §8 trap 3).  That is a
+# second, confounded change riding along inside a task about the drift term, and
+# `config.WRIST_PIVOT_COG_SCALE`'s fit-window-only provenance is explicitly out
+# of scope this round.  Kept separate, so `k` is bit-identical before and after
+# (0.907468 both ways, printed by check_overlay_match.py §8(b)).
+#
+# WHY HELD OUT.  The committed drift term (`config.WRIST_PIVOT_DRIFT_GAIN`) is
+# derived from the accelerometer alone and is fitted to NOTHING, so these 14
+# reads are pure validation of it, exactly like f146-220.  They are fit data the
+# moment anything is fitted to them: `scripts/fit_pivot_drift.py`'s procedures A
+# and B do fit them, which is why neither is committed and why both report
+# f146-220 as their only independent score.
+RACKET_HEAD_PX_PRE116_ANGLE_1: dict[int, tuple[float, float]] = {
+    90: (228.0, 415.0),
+    92: (233.0, 420.0),
+    94: (241.0, 428.0),
+    96: (250.0, 447.0),
+    98: (258.0, 462.0),
+    100: (268.0, 477.0),
+    102: (283.0, 491.0),
+    104: (297.0, 503.0),
+    106: (315.0, 523.0),
+    108: (333.0, 540.0),
+    110: (351.0, 550.0),
+    112: (371.0, 570.0),
+    114: (390.0, 577.0),
+    115: (405.0, 588.0),
+}
+
+# Matching wrist/hand pixels, same frames, same method, same uncertainty.
+WRIST_PX_PRE116_ANGLE_1: dict[int, tuple[float, float]] = {
+    90: (423.0, 443.0),
+    92: (440.0, 445.0),
+    94: (444.0, 456.0),
+    96: (440.0, 457.0),
+    98: (458.0, 463.0),
+    100: (467.0, 472.0),
+    102: (480.0, 477.0),
+    104: (490.0, 480.0),
+    106: (500.0, 482.0),
+    108: (517.0, 485.0),
+    110: (527.0, 487.0),
+    112: (545.0, 488.0),
+    114: (568.0, 496.0),
+    115: (577.0, 490.0),
+}
+
+# --------------------------------------------------------------------------- #
 # HELD-OUT VALIDATION SET — f146-220.  **NEVER FED TO solvePnP.**
 # --------------------------------------------------------------------------- #
 # Provenance
@@ -190,6 +265,15 @@ assert not (set(RACKET_HEAD_PX_ANGLE_1) & set(RACKET_HEAD_PX_HELDOUT_ANGLE_1)), 
     "held-out frames leaked into the PnP annotation set"
 assert set(RACKET_HEAD_PX_HELDOUT_ANGLE_1) == set(WRIST_PX_HELDOUT_ANGLE_1), \
     "held-out head and wrist reads must cover the same frames"
+
+# Structural guards, same shape as the held-out asserts above.
+assert not (set(RACKET_HEAD_PX_PRE116_ANGLE_1) & set(RACKET_HEAD_PX_ANGLE_1)), \
+    "pre-116 frames leaked into the PnP annotation set"
+assert not (set(RACKET_HEAD_PX_PRE116_ANGLE_1)
+            & set(RACKET_HEAD_PX_HELDOUT_ANGLE_1)), \
+    "pre-116 and held-out sets must not overlap"
+assert set(RACKET_HEAD_PX_PRE116_ANGLE_1) == set(WRIST_PX_PRE116_ANGLE_1), \
+    "pre-116 head and wrist reads must cover the same frames"
 
 # --------------------------------------------------------------------------- #
 # The one automatic correspondence: ball-racket contact
@@ -286,7 +370,8 @@ class Correspondences:
 
 
 def build_correspondences(swing, sync, *, include_contact: bool = True,
-                          obj_mode: str = "center") -> Correspondences:
+                          obj_mode: str = "center",
+                          include_pre116: bool = False) -> Correspondences:
     """Pair each annotated frame with the ``tip`` sample at that frame's centre.
 
     ``obj_mode``:
@@ -332,6 +417,30 @@ def build_correspondences(swing, sync, *, include_contact: bool = True,
         img.append(CONTACT_PIXEL)
         obj.append(np.asarray(swing.head[i], float))
         labels.append(f"f{CONTACT_FRAME_EXACT:.3f} ball contact")
+
+    if include_pre116:
+        # OPT-IN, default OFF.  `solved_pose` must NEVER pass this: widening
+        # the PnP fit window with these reads as pose-only points buys ~12 px
+        # on pre-116 and costs the held-out set between 8 px (4 points) and a
+        # DOUBLING to 177 px (all 14) — measured, Artifacts/analysis.md §4.2.
+        # The only caller is `scripts/fit_pivot_drift.py`, which uses them to
+        # fit the drift term (procedure B) and reports f146-220 as its score.
+        for f in sorted(RACKET_HEAD_PX_PRE116_ANGLE_1):
+            i = sync.imu_idx_for_frame_centered(int(f))
+            if int(sync.frame_index[i]) != int(f):
+                raise ValueError(
+                    f"frame {f}: centred IMU sample {i} maps to frame "
+                    f"{int(sync.frame_index[i])}, not {f}")
+            if obj_mode == "binmean":
+                bin_ = np.flatnonzero(sync.frame_index == int(f))
+                pt = swing.head[bin_].mean(axis=0)
+            else:
+                pt = swing.head[i]
+            frames.append(float(f))
+            idxs.append(int(i))
+            img.append(RACKET_HEAD_PX_PRE116_ANGLE_1[f])
+            obj.append(np.asarray(pt, float))
+            labels.append(f"f{f:d} head PRE116")
 
     leaked = set(np.asarray(frames, float).astype(int)) & set(
         RACKET_HEAD_PX_HELDOUT_ANGLE_1)

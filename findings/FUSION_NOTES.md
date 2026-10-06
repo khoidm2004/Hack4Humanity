@@ -614,3 +614,190 @@ point in history, same policy as §9's retractions above).
   40 deg check rests on an estimator whose own axis error can exceed 40 deg.
   The axis conclusion survives on Evidences B and C, which are independent
   of this estimator. **Not contrary evidence — the axis is not reopened.**
+
+## 11. The pivot's missing linear drift term
+
+Follow-up to §10: after that PR merged, the overlay tracks the racket head
+well inside roughly f108-152 and comes off before and after. The "after" side
+(previously "f146-220 held-out") is §10's already-disclosed gap, unchanged by
+this section. The "before" side is new and is the subject of this section.
+
+### 11.1 The symptom and the measurement
+
+The pre-116 residual ramp (`Artifacts/analysis.md` §2.2, re-verified here via
+`scripts/dump_swing_frames.py --verify`) runs 145.4 px at f90, falling
+smoothly to 6.7 px at f115 (≈5.5 px per video frame — a ramp, not a kink).
+An initial by-eye estimate of f112's offset (~150 px) was wrong: a proper
+gridded read puts it at 19.2 px — the dot is already essentially on the
+racket there. The measured good window is **≈ f108-152**, not f114-143 as
+first assumed.
+
+### 11.2 Four falsified premises
+
+Four assumptions made going into this task turned out to be wrong, caught by
+measurement rather than carried forward (`Artifacts/analysis.md` §0):
+
+| assumption | verdict |
+|---|---|
+| "the good window (114-143) is almost exactly the PnP fit window" | **FALSE.** No kink at f116 or f145; f130 (the fit window's own temporal centre) is its *worst* fit-window frame at 38.9 px. |
+| "a single rigid pose can only cancel error locally" | **FALSE.** One static pose over f90-145 reconciles both spans (fit 10.6 px / pre-116 10.3 px) — but no single pose reconciles f116-145 with f146-220. The two ends are different problems. |
+| "`GRAVITY_REF_SAMPLES`'s reference window could let gyro drift accumulate" | **FALSIFIED.** `q0` is a pure left-multiply so PnP absorbs it exactly, and sweeping `GRAVITY_REF_SAMPLES` in {10,25,50,100} moves every residual by ≤0.1 px. |
+| "mean out-of-plane angle error 12.3°" (the post-145 gap) | **STALE.** That was the `k=0.75` intermediate from the prior round; the committed figure is 8.5°. |
+
+### 11.3 It is the pivot, not the orientation
+
+Decomposing each pre-116 head error into (pivot error) + (lever/orientation
+error) puts **80-90% of the error on the pivot**. The racket's own *image
+angle* (orientation only, translation-immune) is actually *better* pre-116
+(5.06° mean) than inside the fit window (11.13°) or the follow-through
+(8.5°) — this is not an orientation problem. The projected-pivot-to-
+annotated-wrist travel ratio runs 0.56x before the fit window, 1.03x during
+it, 2.16x after it, 0.19x net across the whole record (`Artifacts/analysis.md`
+§3) — the pivot undershoots exactly where the overlay visibly comes off the
+racket.
+
+### 11.4 The mechanism
+
+`fusion.rest_to_rest_cog`'s final step, `_detrend_rest_to_rest`, removes a
+linear trend from the double-integrated position so the path starts and ends
+near the origin — standard practice for a ~1 s strapdown integration with no
+position aiding. Measured directly from `data/raw_data.csv`: the removed
+ramp is **1.404 m** (`[-1.2967, +0.1899, -0.5044]`) against a surviving
+detrended `cog` net displacement of only **0.782 m** — the detrend removes
+*more* net displacement than it keeps.
+
+The detrend is load-bearing, not a bug to delete outright: scoring the
+pose with the position detrend skipped entirely (pivot built straight from
+the undetrended double-integrated position, no linear term restored) blows
+the held-out median up into the hundreds of pixels — measured here at 430.5
+px with the robust solver (596-658 px with the plain solvers) against the
+committed 78.9 px. The fix is to give back a *modelled* ramp on top of the
+still-detrended `cog`, not to remove the detrend.
+
+### 11.5 Three procedures, one committed
+
+Scored with the pose **re-solved** from the committed 13+contact set (the
+deployed configuration), b x 400 and all three spans (med/mean/max px):
+
+| procedure | `b`x400 (m) | `|b|`x400 | fit | pre-116 | held-out | verdict |
+|---|---|---|---|---|---|---|
+| committed `b=0` (pre-this-section) | — | 0 | 15.56/16.13/38.88 | 50.50/59.92/145.40 | 78.93/74.57/156.56 | baseline |
+| **C** accel-derived, COMMITTED | `[-1.176,+0.172,-0.457]` | 1.274 | 15.78/16.38/38.69 | 23.17/30.35/82.05 | **72.56/72.07/113.58** | all gates pass, all 3 held-out stats improve |
+| A two-step (pose fixed, `b` on pre-116 only) | `[-1.273,+0.148,-1.130]` | 1.709 | 15.89/16.67/38.88 | 22.29/28.11/74.03 | 76.83/74.50/123.95 | passes; held-out mean improves only 0.07 px |
+| B joint `(rvec,tvec,b)`, seed 0 | `[-1.433,+0.535,-0.712]` | 1.687 | 15.68/16.48/38.25 | 17.85/24.34/68.51 | 73.48/72.42/124.93 | passes |
+| B joint, **seeded at C's `b`** | `[-1.739,-0.024,-0.455]` | 1.798 | 15.09/16.49/38.91 | 7.31/13.56/44.66 | **97.37/91.00/145.58** | **held-out median AND mean regress** |
+
+All five rows are printed by `scripts/fit_pivot_drift.py`. **C is committed
+because it has no objective to minimise.** Procedures A and B both involve a
+least-squares fit against annotated pixels, and B's own two rows show the
+fit landing in a different local minimum depending on its seed: the seed
+that posts the *best* pre-116 number (7.3 px median) is the one that makes
+the *never-touched* held-out set worse. This is the same lesson as PR #9's
+FOV sweep (§4-§5 above) and PR #10's `k`-sweep (§10.4): a single optimizer
+run on a non-convex objective is a lead, not a result. C sidesteps that
+entirely — it is a closed-form derivation from the accelerometer, so there
+is no local minimum to land in the wrong one of.
+
+### 11.6 Two independent channels
+
+`b_C` (accelerometer, committed) = `[-1.176, +0.172, -0.457] m`.
+`b_A` (image, 14 hand-read pre-116 pixels, pose held fixed) =
+`[-1.273, +0.148, -1.130] m`. **Angle between them: 20.4°. Magnitude ratio:
+1.342.** Both re-derived independently in this worktree
+(`scripts/fit_pivot_drift.py` §1/§8), not copied from any prior draft.
+
+This is **20.4°, not the 11.8° an earlier joint-fit `b` had claimed** — that
+figure came from a joint fit that does not reproduce under independent
+re-verification, and its accompanying claim ("improves on all three held-out
+statistics") is **retracted for procedure B**. It holds for procedure C
+instead, by a different (non-fitted) route — see §11.5's table.
+
+### 11.7 Gain and centring sweeps
+
+Both reported by `scripts/fit_pivot_drift.py --sweep`, neither argmin taken:
+
+```
+gain  fit med/mean/max     pre-116 med      held-out med/mean/max
+0.00  15.56/16.13/38.88    50.50            78.93/74.57/156.56
+0.50  15.80/16.19/38.65    35.66            72.45/67.74/117.10
+0.75  15.66/16.26/38.55    28.20            65.20/68.35/111.55
+1.00  15.78/16.38/38.69    23.17            72.56/72.07/113.58   <- COMMITTED
+1.25  16.52/16.89/50.62   255.22           432.51/385.12/635.94  <- BAD PnP MINIMUM
+1.50  15.49/16.61/38.41    10.39            98.54/87.07/131.91   <- held-out REGRESSES
+2.00  16.42/16.73/50.04   271.65           425.95/392.23/642.43  <- BAD PnP MINIMUM
+```
+
+Gain 0.75 posts the best held-out median and gain 1.50 the best pre-116
+median; 1.50 regresses the held-out set and 1.25/2.00 collapse into bad PnP
+minima (`|tvec|` ~2.6 m). `gain=1.0` is committed because it is the
+*derived* value — `b = k x removed_slope`, not an argmin.
+
+```
+centre   fit med  |tvec|
+0        16.57    2.007 m   (bad PnP minimum)
+200      15.78    4.357 m   <- COMMITTED
+399      15.73    4.743 m   (outside the 3.5-4.6 m player-height anchor band)
+```
+
+A constant 3D offset is a gauge freedom in exact arithmetic, but the
+multi-solver PnP path is non-convex and the centring changes which minimum
+it lands in. 200 (the record's midpoint) is a documented convention, not a
+free parameter.
+
+### 11.8 Where the pre-116 reads live and why
+
+The 14 new pre-116 annotations (`src/overlay_calib.py`,
+`RACKET_HEAD_PX_PRE116_ANGLE_1` / `WRIST_PX_PRE116_ANGLE_1`) live in their
+**own, separate dicts**, not folded into `RACKET_HEAD_PX_ANGLE_1` /
+`WRIST_PX_ANGLE_1`. Measured: folding them in moves route-1 `k` from
+0.9075 to **1.124** purely as a side effect (`racket_pixel_scale` maxes
+`|head-wrist|` and `wrist_cog_scale` takes its window from those same
+dicts), dragging `racket_distance_m`, `model_vs_video_arc` and
+`fullspan_arc_bound` with it — a second, confounded change riding along
+inside a task about the drift term. Kept separate, `k` is bit-identical
+before and after (`0.907468`, printed by `check_overlay_match.py` §8(b)).
+
+They are also never fed to `solved_pose`'s correspondence set by default:
+`build_correspondences` gained an `include_pre116` flag, default `False`,
+used only by `scripts/fit_pivot_drift.py`. Widening the PnP fit window with
+these reads was measured (`Artifacts/analysis.md` §4.2) to buy ~12 px on
+pre-116 at a cost to the held-out set of 8 px (4 points) to a **doubling to
+177 px** (all 14) — a bad trade, deliberately not taken.
+
+### 11.9 Honest costs, all of them
+
+- Fit window: median 15.56 -> **15.78** px, mean 16.13 -> **16.38** px (both
+  inside their gates, both slightly worse); max 38.88 -> 38.69 px (slightly
+  better); inliers unchanged 13/14.
+- Held-out image-angle: 8.51° -> **9.29°**, which trips PR #10's own printed
+  9.1° line in `report_followthrough.py` — reported, not tuned; that line is
+  not one of this round's 8 acceptance criteria and the script always exits
+  0 (it is a reporting script, not a gate, by its own docstring).
+- Fit-window image-angle: 11.13° -> 12.48°.
+- `|tvec|`: 4.232 -> 4.357 m (inside the 3.5-4.6 m player-height anchor
+  band).
+- `model_vs_video_arc` ratio: 0.904 -> 0.943 (closer to 1.0, better);
+  full-span ratio: 1.319 -> 1.305.
+- Pivot span: 1.481 -> **1.784 m** (gate is < 3.0 m, comfortably inside; it
+  would fail at `|b|x400` ~ 3.46, the magnitude the earlier, non-reproducing
+  joint-fit `b` had produced — a useful independent plausibility check that
+  that fit's magnitude was too large).
+- Nothing here fixes the follow-through's orientation error — §10's
+  disclosed gap is unchanged in kind, improved only incidentally in
+  magnitude (held-out max 156.6 -> 113.6 px).
+
+### 11.10 The camera is not perfectly static
+
+Two independent background patches agree on ~8-9 px of leftward camera drift
+over f90->f220 (`Artifacts/analysis.md` §5). Smaller than the ±15-25 px
+annotation uncertainty, so not the mechanism here, but it puts a ~9 px floor
+under any static-pose approach to this footage. Noted, not modelled.
+
+### 11.11 Still out of scope, carried forward
+
+- `racket_pixel_scale`'s f116-145 window (§10.1, §10.4, §11.8).
+- `CALIB_FOV_DEG = 60` (§10.9).
+- The follow-through orientation error (§10, unchanged in kind by this
+  section).
+- Whether the f130 contact correspondence still earns its place
+  (`Artifacts/analysis.md` §9, open question 5).

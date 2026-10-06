@@ -32,8 +32,11 @@ class Swing:
         Sensor (centre-of-gravity-ish) position in world space
         (rest-to-rest model).
     pivot : (N, 3) float, metres
-        Wrist (pivot) position in world space, ``config.WRIST_PIVOT_COG_SCALE
-        * cog``.  Defaults to zeros, which is the pre-2026-10-05 behaviour (the
+        Wrist (pivot) position in world space, built by
+        ``fusion.wrist_pivot(cog, removed_slope=...)`` —
+        ``WRIST_PIVOT_COG_SCALE * cog`` plus the linear drift term
+        ``config.WRIST_PIVOT_DRIFT_GAIN`` restores (see ``src/config.py``).
+        Defaults to zeros, which is the pre-2026-10-05 behaviour (the
         wrist pinned at the world origin) and is what an older ``swing.npz``
         without this array loads as.
     gyro_deg : (N, 3) float, deg/s
