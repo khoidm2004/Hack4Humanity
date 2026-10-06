@@ -1,8 +1,6 @@
-# Tennishot
+# **Hack For Humanity Hackathon** - Tennishot 🎾
 
-A product of the **Hack For Humanity Hackathon**.
-
-## Goal
+## Goal 🎯
 
 Reconstruct a **3D representation of a tennis shot (swing)** from raw IMU
 sensor data alone — no computer-vision tracking, no ML, no pose estimation.
@@ -15,7 +13,11 @@ sensor**, not inferred by an AI from the footage — the video is sync'd
 alongside it only as a rough visual check, with path-projection and only
 approximate time alignment (not pixel-perfect tracking).
 
-## Tech stack
+## Builder 👷
+- [Dung Nguyen](https://github.com/pjazzy314159)
+- [Khoi Do](https://github.com/khoidm2004)
+
+## Tech stack 💻
 
 | area | tool |
 |---|---|
@@ -28,7 +30,7 @@ approximate time alignment (not pixel-perfect tracking).
 
 See `pyproject.toml` for exact versions.
 
-## How the swing is calculated and visualized
+## How the swing is calculated and visualized 🧮
 
 All fusion math lives in `src/fusion.py`; the result is a shared `Swing`
 contract (`data/outputs/swing.npz`) that both the metrics and the overlay
@@ -61,7 +63,7 @@ Full derivations, measured constants, and the evidence behind each modeling
 choice are written up in `findings/FUSION_NOTES.md` and the earlier
 `findings/*.md` files — this section is the short version.
 
-## Running it locally
+## Running it locally ⬇️
 
 ```bash
 # 1. install dependencies into a local .venv (first time only)
@@ -92,7 +94,7 @@ uv run python scripts/verify_fusion.py
 uv run python scripts/mock_swing.py   # optional: synthetic swing for dev
 ```
 
-## Project layout
+## Project layout 📂
 
 ```
 data/raw_data.csv            # raw IMU, 400 samples x 6 channels @ 416 Hz
@@ -113,3 +115,5 @@ scripts/verify_fusion.py     # sanity check + writes swing.npz
 scripts/mock_swing.py        # synthetic swing for parallel dev / fallback
 findings/                    # investigative write-ups and measured evidence
 ```
+
+## [Demo ▶️](https://res.cloudinary.com/dm8cfdqsv/video/upload/v1791298134/Screen_Recording_2026-10-06_at_17.41.15_rrvvul.mov)
