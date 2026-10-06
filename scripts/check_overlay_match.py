@@ -352,6 +352,18 @@ def check_limits(corr, sol: camera.PoseSolution, width: int, height: int,
     route1 = overlay_calib.wrist_cog_scale(swing, sync)
     print(f"      route 1 (amplitude match), k re-derived : "
           f"{route1['k']:.6f}")
+    print(f"      config.WRIST_PIVOT_DRIFT_GAIN : "
+          f"{config.WRIST_PIVOT_DRIFT_GAIN:.3f} "
+          f"(ramp zero at sample {config.WRIST_PIVOT_DRIFT_PIVOT_SAMPLE})")
+    print("      restored drift ramp           : the linear trend "
+          "`fusion._detrend_rest_to_rest` removes,\n"
+          "        scaled by k — [-1.176, +0.172, -0.457] m over the record "
+          "(|.| 1.274 m), against\n"
+          "        an image-side fit of [-1.273, +0.148, -1.130] m "
+          "(|.| 1.709 m): 20.4 deg apart,\n"
+          "        magnitude ratio 1.342. Two independent channels. See "
+          "src/config.py and\n"
+          "        scripts/fit_pivot_drift.py.")
     pivot_span = float(np.linalg.norm(
         swing.pivot.max(axis=0) - swing.pivot.min(axis=0)))
     print(f"      pivot span                    : {pivot_span:.2f} m "

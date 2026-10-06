@@ -191,10 +191,13 @@ def dump(frames: list[int], region: tuple[int, int, int, int] | None = None,
 
 def verify(frames: list[int] | None = None) -> None:
     """Re-draw the committed annotations so they can be read back by eye."""
-    from src.overlay_calib import RACKET_HEAD_PX_ANGLE_1, WRIST_PX_ANGLE_1
+    from src.overlay_calib import (RACKET_HEAD_PX_ANGLE_1, WRIST_PX_ANGLE_1,
+                                   RACKET_HEAD_PX_PRE116_ANGLE_1,
+                                   WRIST_PX_PRE116_ANGLE_1)
 
     OUT_DIR.mkdir(parents=True, exist_ok=True)
-    marks = RACKET_HEAD_PX_ANGLE_1
+    marks = {**RACKET_HEAD_PX_PRE116_ANGLE_1, **RACKET_HEAD_PX_ANGLE_1}
+    wrists = {**WRIST_PX_PRE116_ANGLE_1, **WRIST_PX_ANGLE_1}
     want = sorted(marks) if frames is None else [f for f in frames if f in marks]
     if not want:
         print("  no annotations to verify")
@@ -211,8 +214,8 @@ def verify(frames: list[int] | None = None) -> None:
         cv2.line(out, (iu, iv - 34), (iu, iv + 34), (0, 0, 255), 1, cv2.LINE_AA)
         cv2.putText(out, f"f{f} head ({u:.0f},{v:.0f})", (iu + 26, iv - 26),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2, cv2.LINE_AA)
-        if f in WRIST_PX_ANGLE_1:
-            wu, wv = WRIST_PX_ANGLE_1[f]
+        if f in wrists:
+            wu, wv = wrists[f]
             cv2.circle(out, (int(round(wu)), int(round(wv))), 14,
                        (255, 120, 0), 2, cv2.LINE_AA)
             cv2.line(out, (iu, iv), (int(round(wu)), int(round(wv))),

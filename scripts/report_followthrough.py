@@ -297,17 +297,27 @@ def ratio_ab(sol, swing_alt, sync):
     return float(np.median(a_vals)), float(np.median(b_vals))
 
 
-def print_before_after(swing0, sync, lever):
-    """Deliverable 4 — eight statistics, k=0 against the committed k."""
+def print_before_after(swing0, sync, lever, removed_slope, drift_gain):
+    """Deliverable 4 — eight statistics, k=0 / k=0.907 (no drift) / + drift.
+
+    Criterion 5's bar (mean |angle error| <= 9.1 deg) is PR #10's own
+    acceptance line, not this round's — it is expected to move 8.51 -> 9.29
+    and print FAIL; report it, do not chase it (plan §0, `Artifacts/TASK.md`).
+    """
     _rule("8. Before/after — the omitted wrist translation (deliverable 4)")
     base_tip = tip_for_lever(swing0.quat, lever)
-    ks = (0.0, config.WRIST_PIVOT_COG_SCALE)
-    print(f"  {'k':>6}{'fit med':>9}{'fit mean':>10}{'fit max':>9}{'inl':>7}"
-          f"{'held med':>10}{'mean|ang|':>11}{'|tvec|':>8}"
-          f"{'ratioA':>8}{'ratioB':>8}  {'solver':<10}")
+    rows_spec = [(0.0, 0.0, "k=0 (pre-PR#10)"),
+                 (config.WRIST_PIVOT_COG_SCALE, 0.0, "k=0.907, no drift (PR#10)"),
+                 (config.WRIST_PIVOT_COG_SCALE, drift_gain, "k=0.907 + drift (now)")]
+    print(f"  {'label':<26}{'k':>6}{'gain':>6}{'fit med':>9}{'fit mean':>10}"
+          f"{'fit max':>9}{'inl':>7}{'held med':>10}{'mean|ang|':>11}"
+          f"{'|tvec|':>8}{'ratioA':>8}{'ratioB':>8}  {'solver':<10}")
     rows = {}
-    for k in ks:
-        swing_k = replace(swing0, tip=base_tip, pivot=k * swing0.cog)
+    for k, gain, label in rows_spec:
+        swing_k = replace(swing0, tip=base_tip,
+                          pivot=fusion.wrist_pivot(swing0.cog, scale=k,
+                                                    removed_slope=removed_slope,
+                                                    drift_gain=gain))
         corr, sol = solve_for(swing_k, sync)
         held_rows = held_out_residuals(sol, swing_k, sync, None)
         held_resids = np.array([r[-1] for r in held_rows], float)
@@ -322,49 +332,54 @@ def print_before_after(swing0, sync, lever):
             tvec=sol.camera_distance_m, ratio_a=ratio_a, ratio_b=ratio_b,
             solver=sol.solver,
         )
-        rows[k] = row
-        print(f"  {k:6.3f}{row['fit_med']:9.2f}{row['fit_mean']:10.2f}"
-              f"{row['fit_max']:9.2f}{row['inliers']:4d}/{row['n']:<2d}"
+        rows[label] = row
+        print(f"  {label:<26}{k:6.3f}{gain:6.2f}{row['fit_med']:9.2f}"
+              f"{row['fit_mean']:10.2f}{row['fit_max']:9.2f}"
+              f"{row['inliers']:4d}/{row['n']:<2d}"
               f"{row['held_med']:10.1f}{row['mean_abs_angle']:11.1f}"
               f"{row['tvec']:8.3f}{row['ratio_a']:8.3f}{row['ratio_b']:8.3f}"
               f"  {row['solver']:<10}")
 
-    b0, b1 = rows[ks[0]], rows[ks[1]]
-    print("\n  Delta (committed k - k=0):")
-    print(f"    fit median {b1['fit_med'] - b0['fit_med']:+.2f} px   "
-          f"fit mean {b1['fit_mean'] - b0['fit_mean']:+.2f} px   "
-          f"fit max {b1['fit_max'] - b0['fit_max']:+.2f} px")
-    print(f"    inliers {b1['inliers']}/{b1['n']} vs {b0['inliers']}/{b0['n']}"
-          f"   held-out median {b1['held_med'] - b0['held_med']:+.1f} px   "
-          f"mean|angle| {b1['mean_abs_angle'] - b0['mean_abs_angle']:+.1f} deg")
-    print(f"    |tvec| {b1['tvec'] - b0['tvec']:+.3f} m   "
-          f"ratio A {b1['ratio_a'] - b0['ratio_a']:+.3f}   "
-          f"ratio B {b1['ratio_b'] - b0['ratio_b']:+.3f}")
+    labels = [spec[2] for spec in rows_spec]
+    b0, b1, b2 = rows[labels[0]], rows[labels[1]], rows[labels[2]]
+    print(f"\n  Delta ({labels[2]!r} - {labels[1]!r}, i.e. this round's drift "
+          "term against PR #10's committed baseline):")
+    print(f"    fit median {b2['fit_med'] - b1['fit_med']:+.2f} px   "
+          f"fit mean {b2['fit_mean'] - b1['fit_mean']:+.2f} px   "
+          f"fit max {b2['fit_max'] - b1['fit_max']:+.2f} px")
+    print(f"    inliers {b2['inliers']}/{b2['n']} vs {b1['inliers']}/{b1['n']}"
+          f"   held-out median {b2['held_med'] - b1['held_med']:+.1f} px   "
+          f"mean|angle| {b2['mean_abs_angle'] - b1['mean_abs_angle']:+.1f} deg")
+    print(f"    |tvec| {b2['tvec'] - b1['tvec']:+.3f} m   "
+          f"ratio A {b2['ratio_a'] - b1['ratio_a']:+.3f}   "
+          f"ratio B {b2['ratio_b'] - b1['ratio_b']:+.3f}")
 
-    print("\n  Acceptance criteria (Artifacts/TASK.md):")
-    print(f"    1. held-out median <= 100 px (was {b0['held_med']:.1f})   : "
-          f"{b1['held_med']:.1f} px -> "
-          f"{'PASS' if b1['held_med'] <= 100.0 else 'FAIL'}")
-    print(f"    2. |tvec| in 3.5-4.6 m (was {b0['tvec']:.3f})             : "
-          f"{b1['tvec']:.3f} m -> "
-          f"{'PASS' if 3.5 <= b1['tvec'] <= 4.6 else 'FAIL'}")
-    crit3 = (b1['fit_mean'] <= b0['fit_mean'] and b1['fit_max'] <= b0['fit_max']
-              and b1['inliers'] >= b0['inliers'])
-    print(f"    3. mean/max/inliers improve (median may rise, and did: "
-          f"{b0['fit_med']:.2f} -> {b1['fit_med']:.2f})           : "
-          f"mean {b0['fit_mean']:.1f}->{b1['fit_mean']:.1f}, "
-          f"max {b0['fit_max']:.1f}->{b1['fit_max']:.1f}, "
-          f"inliers {b0['inliers']}->{b1['inliers']} -> "
+    print("\n  Acceptance criteria (Artifacts/TASK.md), baseline = PR #10 "
+          f"({labels[1]!r}):")
+    print(f"    1. held-out median <= 100 px (was {b1['held_med']:.1f})   : "
+          f"{b2['held_med']:.1f} px -> "
+          f"{'PASS' if b2['held_med'] <= 100.0 else 'FAIL'}")
+    print(f"    2. |tvec| in 3.5-4.6 m (was {b1['tvec']:.3f})             : "
+          f"{b2['tvec']:.3f} m -> "
+          f"{'PASS' if 3.5 <= b2['tvec'] <= 4.6 else 'FAIL'}")
+    crit3 = (b2['fit_mean'] <= b1['fit_mean'] and b2['fit_max'] <= b1['fit_max']
+              and b2['inliers'] >= b1['inliers'])
+    print(f"    3. mean/max/inliers improve (median may rise: "
+          f"{b1['fit_med']:.2f} -> {b2['fit_med']:.2f})           : "
+          f"mean {b1['fit_mean']:.1f}->{b2['fit_mean']:.1f}, "
+          f"max {b1['fit_max']:.1f}->{b2['fit_max']:.1f}, "
+          f"inliers {b1['inliers']}->{b2['inliers']} -> "
           f"{'PASS' if crit3 else 'FAIL'}")
-    print(f"    4. |ratio A - 1| <= 0.10 (was {abs(b0['ratio_a'] - 1.0):.3f}) : "
-          f"{abs(b1['ratio_a'] - 1.0):.3f} -> "
-          f"{'PASS' if abs(b1['ratio_a'] - 1.0) <= 0.10 else 'FAIL'}")
-    print(f"    5. mean |angle error| <= 9.1 deg (was {b0['mean_abs_angle']:.1f})"
-          f"      : {b1['mean_abs_angle']:.1f} deg -> "
-          f"{'PASS' if b1['mean_abs_angle'] <= 9.1 else 'FAIL'}")
+    print(f"    4. |ratio A - 1| <= 0.10 (was {abs(b1['ratio_a'] - 1.0):.3f}) : "
+          f"{abs(b2['ratio_a'] - 1.0):.3f} -> "
+          f"{'PASS' if abs(b2['ratio_a'] - 1.0) <= 0.10 else 'FAIL'}")
+    print(f"    5. mean |angle error| <= 9.1 deg (was {b1['mean_abs_angle']:.1f})"
+          f"  [PR #10's own bar, not this round's -- report, do not chase]"
+          f"      : {b2['mean_abs_angle']:.1f} deg -> "
+          f"{'PASS' if b2['mean_abs_angle'] <= 9.1 else 'FAIL'}")
 
 
-def print_k_routes(swing0, sync, lever):
+def print_k_routes(swing0, sync, lever, removed_slope, drift_gain):
     """Both routes for `config.WRIST_PIVOT_COG_SCALE`, and which was committed."""
     _rule("9. k — both routes (deliverable 2)")
     print("  Route 1 — amplitude matching (COMMITTED):")
@@ -395,7 +410,10 @@ def print_k_routes(swing0, sync, lever):
           f"{'|tvec|':>8}  {'solver':<10}"
           f"{'held med VALIDATION ONLY - not used to choose k':>50}")
     for k in ks:
-        swing_k = replace(swing0, tip=base_tip, pivot=k * swing0.cog)
+        swing_k = replace(swing0, tip=base_tip,
+                          pivot=fusion.wrist_pivot(swing0.cog, scale=k,
+                                                    removed_slope=removed_slope,
+                                                    drift_gain=drift_gain))
         corr, sol = solve_for(swing_k, sync)
         held_rows = held_out_residuals(sol, swing_k, sync, None)
         held_resids = np.array([r[-1] for r in held_rows], float)
@@ -424,6 +442,9 @@ def main() -> int:
     p.add_argument("--k", type=float, default=None,
                    help="pivot = k * cog; default config.WRIST_PIVOT_COG_SCALE. "
                         "Use --k 0 for the pre-pivot pinned-wrist behaviour.")
+    p.add_argument("--drift-gain", type=float, default=None,
+                   help="pivot drift gain; default config.WRIST_PIVOT_DRIFT_GAIN. "
+                        "Use --drift-gain 0 for the pre-drift behaviour.")
     args = p.parse_args()
 
     lever = (config.RACKET_LEVER_BODY if args.lever is None
@@ -433,6 +454,9 @@ def main() -> int:
     df = load_csv()
     accel, gyro = to_signal_arrays(df)
     swing0 = fusion.reconstruct(accel, gyro)   # quat is lever-independent
+    removed_slope = fusion.wrist_drift_slope(accel, gyro)
+    drift_gain = (config.WRIST_PIVOT_DRIFT_GAIN if args.drift_gain is None
+                  else float(args.drift_gain))
 
     from src.synced_data import SyncedData
     from src.sync import paths as sync_paths
@@ -444,7 +468,10 @@ def main() -> int:
         raise LookupError(f"no sync table configured for {oc.LABEL!r}")
 
     tip_alt = tip_for_lever(swing0.quat, lever)
-    swing_alt = replace(swing0, tip=tip_alt, pivot=k * swing0.cog)
+    swing_alt = replace(swing0, tip=tip_alt,
+                       pivot=fusion.wrist_pivot(swing0.cog, scale=k,
+                                                 removed_slope=removed_slope,
+                                                 drift_gain=drift_gain))
 
     corr, sol = solve_for(swing_alt, sync)
 
@@ -456,8 +483,8 @@ def main() -> int:
     print_held_out_angle(sol, swing_alt, sync)
     print_windowed_extent(sol, swing_alt, sync)
     print_arc_ratio(swing_alt, sync)
-    print_before_after(swing0, sync, lever)
-    print_k_routes(swing0, sync, lever)
+    print_before_after(swing0, sync, lever, removed_slope, drift_gain)
+    print_k_routes(swing0, sync, lever, removed_slope, drift_gain)
 
     return 0
 

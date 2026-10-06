@@ -148,21 +148,40 @@ def run_checks(accel, gyro, swing) -> list[str]:
     # lever-direction checks below, and `racket_pixel_scale`'s L-cancellation
     # argument at once (|tip + 0.907*cog| runs 0.686 -> ~1.5 m) — which is why
     # it is its own field.  See Artifacts/analysis.md §9.3.
-    expect_pivot = config.WRIST_PIVOT_COG_SCALE * swing.cog
+    # Re-derived from the RAW signals, not read back out of `wrist_pivot`, so
+    # this stays a real check rather than a tautology.
+    removed_slope = fusion.wrist_drift_slope(accel, gyro)
+    b_expect = (config.WRIST_PIVOT_COG_SCALE * config.WRIST_PIVOT_DRIFT_GAIN
+                * removed_slope)
+    s_expect = (np.arange(len(swing.cog), dtype=float)
+                - float(config.WRIST_PIVOT_DRIFT_PIVOT_SAMPLE))
+    expect_pivot = (config.WRIST_PIVOT_COG_SCALE * swing.cog
+                    + np.outer(s_expect, b_expect))
     pdev = float(np.abs(swing.pivot - expect_pivot).max())
     check("pivot finite", bool(np.isfinite(swing.pivot).all()))
     check("pivot shape matches tip",
           swing.pivot.shape == swing.tip.shape,
           f"{swing.pivot.shape} vs {swing.tip.shape}")
     check(
-        "pivot is WRIST_PIVOT_COG_SCALE * cog",
+        "pivot is k*cog + b*(sample - 200), b = k*gain*removed_slope",
         pdev < 1e-12,
-        f"scale={config.WRIST_PIVOT_COG_SCALE:g} max|dev|={pdev:.2e} m",
+        f"scale={config.WRIST_PIVOT_COG_SCALE:g} gain={config.WRIST_PIVOT_DRIFT_GAIN:g} "
+        f"b*400={np.round(b_expect * 400, 4).tolist()} m max|dev|={pdev:.2e} m",
     )
     pivot_span = float(np.linalg.norm(
         swing.pivot.max(axis=0) - swing.pivot.min(axis=0)))
     check("pivot span bounded (< 3 m)", bool(pivot_span < 3.0),
           f"span={pivot_span:.2f} m")
+    checks.append(
+        f"[INFO] restored drift ramp over the record: "
+        f"{np.round(b_expect * 400, 3).tolist()} m "
+        f"(|.|={float(np.linalg.norm(b_expect * 400)):.3f} m); the detrend had "
+        f"removed {np.round(removed_slope * 400, 3).tolist()} m "
+        f"(|.|={float(np.linalg.norm(removed_slope * 400)):.3f} m). Image-side "
+        f"cross-check from the 14 pre-116 annotations: "
+        f"[-1.273, +0.148, -1.130] m (|.|=1.709 m), 20.4 deg apart, "
+        f"magnitude ratio 1.342 — see src/config.py."
+    )
     head_r = np.linalg.norm(swing.head - swing.pivot, axis=1)
     check(
         "head - pivot is still the racket lever (radius preserved)",

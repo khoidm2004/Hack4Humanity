@@ -130,6 +130,84 @@ RACKET_LEVER_BODY = (-1.0, 0.0, 0.0)
 WRIST_PIVOT_COG_SCALE = 0.907
 
 # --------------------------------------------------------------------------- #
+# Wrist / pivot linear drift restoration
+# --------------------------------------------------------------------------- #
+# `fusion.rest_to_rest_cog` ends with `_detrend_rest_to_rest(pos)`, which
+# subtracts a linear trend so the double-integrated path starts and ends near
+# the origin.  Standard practice for a ~1 s strapdown integration with no
+# position aiding — and it throws away REAL displacement, not just integration
+# error.  Measured on data/raw_data.csv: the removed position ramp is
+#     slope * 400 = [-1.2967, +0.1899, -0.5044] m,  |.| = 1.4042 m
+# against a surviving detrended `cog` net displacement of only 0.782 m.  The
+# detrend removes MORE net displacement than it keeps, which is why the pivot
+# reproduced only the oscillatory part of the wrist motion and the overlay came
+# off the racket before f108 (Artifacts/analysis.md §3, findings/FUSION_NOTES.md §11).
+#
+# `fusion.wrist_pivot` gives that ramp back:
+#     pivot(t) = WRIST_PIVOT_COG_SCALE * cog(t) + b * (t - WRIST_PIVOT_DRIFT_PIVOT_SAMPLE)
+#     b = WRIST_PIVOT_COG_SCALE * WRIST_PIVOT_DRIFT_GAIN * removed_slope
+#
+# GAIN = 1.0 means "restore exactly what the detrend removed, scaled by the
+# same k the pivot already uses".  It is DERIVED, not fitted: no annotation,
+# no optimizer, no free parameter.  At gain 1.0,
+#     b * 400 = [-1.1761, +0.1722, -0.4574] m,  |.| = 1.2736 m
+#
+# INDEPENDENT IMAGE-SIDE CROSS-CHECK (acceptance criterion 4).  Fitting the
+# same 3-parameter ramp to the 14 pre-116 video annotations with the camera
+# pose held fixed (`scripts/fit_pivot_drift.py`, procedure A) gives
+#     b * 400 = [-1.27336, +0.14777, -1.12994] m,  |.| = 1.7088 m
+#   -> angle between the two: 20.4 deg;  magnitude ratio 1.342
+# Two wholly independent channels — double-integrated accelerometer vs
+# hand-read video pixels — agreeing on direction to 20 deg and magnitude to
+# 34%.  That agreement is the evidence for this term; the accelerometer value
+# is the one COMMITTED, because it is the one that is not fitted to anything.
+#
+# WHY NOT THE IMAGE-FITTED b.  `scripts/fit_pivot_drift.py` reports three
+# procedures.  Scored with the pose re-solved from the committed 13+contact
+# set (the deployed configuration) against the never-fitted f146-220 reads:
+#     committed b=0                    held-out  78.93 / 74.57 / 156.56 px
+#     C accel-derived (COMMITTED)      held-out  72.56 / 72.07 / 113.58 px
+#     A two-step image fit             held-out  76.83 / 74.50 / 123.95 px
+#     B joint (rvec,tvec,b), seed 0    held-out  73.48 / 72.42 / 124.93 px
+#     B joint, seeded at C's b         held-out  97.37 / 91.00 / 145.58 px  <- WORSE
+# B's answer depends on its SEED, and the seed that posts the best pre-116
+# number (7.3 px median) is the one that makes the held-out set worse.  Same
+# lesson as PR #9's FOV sweep and PR #10's k-sweep: a single optimizer run is
+# a lead, not a result.  C has no objective to minimise, so it has no local
+# minima to land in the wrong one of.
+#
+# GAIN SWEEP, reported not minimised (`fit_pivot_drift.py --sweep`).  The
+# objective is NOT convex and its argmin is NOT the answer:
+#   gain  fit med/mean/max     pre-116 med      held-out med/mean/max
+#   0.00  15.56/16.13/38.88    50.50            78.93/74.57/156.56
+#   0.50  15.80/16.19/38.65    35.66            72.45/67.74/117.10
+#   0.75  15.66/16.26/38.55    28.20            65.20/68.35/111.55
+#   1.00  15.78/16.38/38.69    23.17            72.56/72.07/113.58  <- COMMITTED
+#   1.25  16.52/16.89/50.62   255.22           432.51/385.12/635.94  <- BAD PnP MINIMUM
+#   1.50  15.49/16.61/38.41    10.39            98.54/87.07/131.91  <- held-out REGRESSES
+#   2.00  16.42/16.73/50.04   271.65           425.95/392.23/642.43  <- BAD PnP MINIMUM
+# gain 0.75 posts the best held-out median and gain 1.50 the best pre-116
+# median; 1.50 regresses the held-out set and 1.25/2.00 collapse into bad PnP
+# minima (|tvec| 2.6 m).  1.0 is committed because it is the DERIVED value,
+# and it is the only cell that improves all three statistics on both the
+# pre-116 and the held-out span while leaving every fit-window gate passing.
+# DO NOT tune this to a sweep argmin.
+WRIST_PIVOT_DRIFT_GAIN = 1.0
+
+# Sample index the restored ramp is zero at.  In exact arithmetic this is a
+# pure gauge: a constant 3D offset of the whole point set is absorbed exactly
+# by PnP's `tvec`.  In practice the PnP objective is non-convex and the
+# centring changes which minimum the multi-solver path lands in — MEASURED:
+#     centre   0 -> median 16.57 px, |tvec| 2.007 m  (bad minimum)
+#     centre 200 -> median 15.78 px, |tvec| 4.357 m  <- COMMITTED
+#     centre 399 -> median 15.73 px, |tvec| 4.743 m  (outside the 3.5-4.6 m
+#                                                     player-height anchor band)
+# 200 is the record's midpoint, which minimises |ramp| over the record and
+# keeps |tvec| closest to its committed 4.232 m and inside that band.  A
+# documented convention, not a free parameter.
+WRIST_PIVOT_DRIFT_PIVOT_SAMPLE = 200
+
+# --------------------------------------------------------------------------- #
 # Reconstruction mode
 #    "pivot"        : tip = pivot + R(t) @ (L * RACKET_LEVER_BODY)  <-- main overlay
 #    "rest_to_rest" : double-integrate gravity-free accel with drift correction

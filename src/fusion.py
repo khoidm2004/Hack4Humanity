@@ -202,8 +202,15 @@ def pivot_tip(quat: np.ndarray) -> np.ndarray:
 
 
 def wrist_pivot(cog: np.ndarray,
-                scale: float = config.WRIST_PIVOT_COG_SCALE) -> np.ndarray:
-    """The wrist (pivot) path: ``scale * cog``.
+                scale: float = config.WRIST_PIVOT_COG_SCALE,
+                removed_slope: np.ndarray | None = None,
+                drift_gain: float = config.WRIST_PIVOT_DRIFT_GAIN,
+                drift_pivot_sample: int = config.WRIST_PIVOT_DRIFT_PIVOT_SAMPLE,
+                ) -> np.ndarray:
+    """The wrist (pivot) path: ``scale * cog`` plus a restored linear drift.
+
+    ``pivot(t) = k*cog(t) + b*(t - WRIST_PIVOT_DRIFT_PIVOT_SAMPLE)``, with
+    ``b = k * drift_gain * removed_slope``.
 
     `pivot_tip` gives the racket head RELATIVE to the wrist; this gives where
     the wrist itself is, so the head in world space is `pivot + tip`
@@ -215,16 +222,39 @@ def wrist_pivot(cog: np.ndarray,
     `config.WRIST_PIVOT_COG_SCALE` for how 0.907 was measured and why the
     held-out reads were not used to pick it.
 
+    `removed_slope` (from `rest_to_rest_cog(..., return_removed_slope=True)`
+    or `wrist_drift_slope`) is the linear position trend
+    `_detrend_rest_to_rest` subtracted from the double-integrated wrist
+    path — found to be mostly REAL displacement, not integration error
+    (findings/FUSION_NOTES.md §11). Passing `removed_slope=None` (the
+    default) reproduces the pre-drift-term behaviour exactly — this is a
+    drift *restoration*, not a new calibration.
+
+    CRITICAL INVARIANT: the drift term goes in `pivot`, never in `tip`.
+    Folding it into `tip` would break `|tip| == RACKET_TIP_LEN`, which both
+    of `verify_fusion.py`'s lever-direction checks and
+    `racket_pixel_scale`'s L-cancellation argument depend on (see
+    `src/swing.py:48-55` and `findings/FUSION_NOTES.md` §10.3).
+
     Parameters
     ----------
     cog : (N, 3) float, metres — `rest_to_rest_cog` output.
     scale : float — `config.WRIST_PIVOT_COG_SCALE`.
+    removed_slope : (3,) float or None — m/sample, from `rest_to_rest_cog`.
+    drift_gain : float — `config.WRIST_PIVOT_DRIFT_GAIN`.
+    drift_pivot_sample : int — `config.WRIST_PIVOT_DRIFT_PIVOT_SAMPLE`.
 
     Returns
     -------
     (N, 3) float, metres.
     """
-    return float(scale) * np.asarray(cog, float)
+    c = np.asarray(cog, float)
+    pivot = float(scale) * c
+    if removed_slope is None or float(drift_gain) == 0.0:
+        return pivot
+    b = float(scale) * float(drift_gain) * np.asarray(removed_slope, float)
+    s = np.arange(len(c), dtype=float) - float(drift_pivot_sample)
+    return pivot + np.outer(s, b)
 
 
 def fit_centripetal_lever(accel: np.ndarray,
@@ -362,8 +392,9 @@ def reconstruct(accel: np.ndarray,
     gravity = estimate_gravity(accel_lp)
     quat = integrate_orientation(accel_lp, gyro_lp, gravity, alpha=alpha)
     tip = pivot_tip(quat)
-    cog = rest_to_rest_cog(accel_lp, quat, gravity)
-    pivot = wrist_pivot(cog)
+    cog, removed_slope = rest_to_rest_cog(accel_lp, quat, gravity,
+                                          return_removed_slope=True)
+    pivot = wrist_pivot(cog, removed_slope=removed_slope)
     impact_idx = detect_impact(accel_lp, gyro_lp)
 
     t = np.arange(len(accel), dtype=float) * config.DT
@@ -397,20 +428,31 @@ def _lowpass(x: np.ndarray, cutoff_hz: float = config.GESTURE_LP_HZ) -> np.ndarr
     return sosfiltfilt(sos, x, axis=0)
 
 
+def _linear_slope(v: np.ndarray) -> np.ndarray:
+    """Per-channel least-squares slope of ``v`` against sample index."""
+    t = np.arange(len(v), dtype=float)
+    A = np.vstack([t, np.ones_like(t)]).T
+    (slope, _), *_ = np.linalg.lstsq(A, v, rcond=None)
+    return np.asarray(slope, float)
+
+
 def _detrend_rest_to_rest(v: np.ndarray) -> np.ndarray:
     """Remove a linear trend so the integrated path is rest-to-rest (v0=vN=0).
 
-    Returned array has the same mean but zero best-fit linear slope.
+    Returned array has the same mean but zero best-fit linear slope.  The
+    slope it removes is NOT integration error alone: over this 400-sample
+    record it carries 1.404 m of real position displacement against a
+    surviving path of 0.782 m (findings/FUSION_NOTES.md §11).
+    `rest_to_rest_cog(..., return_removed_slope=True)` hands it back so
+    `wrist_pivot` can give the real part of it back to the pivot.
     """
     t = np.arange(len(v), dtype=float)
-    # Least-squares linear fit per channel.
-    A = np.vstack([t, np.ones_like(t)]).T
-    (slope, _), *_ = np.linalg.lstsq(A, v, rcond=None)
-    return v - np.outer(t, slope)
+    return v - np.outer(t, _linear_slope(v))
 
 
 def rest_to_rest_cog(accel: np.ndarray, quat: np.ndarray,
-                     gravity: np.ndarray) -> np.ndarray:
+                     gravity: np.ndarray, *,
+                     return_removed_slope: bool = False):
     """Sensor position (COG path) via gravity-free double integration.
 
     Strategy (PLAN.md §8):
@@ -418,6 +460,16 @@ def rest_to_rest_cog(accel: np.ndarray, quat: np.ndarray,
       2. high-pass to remove gravity + sensor bias,
       3. integrate -> velocity, detrend (rest-to-rest velocity so v0=vN=0),
       4. integrate -> position, detrend to anchor the start at the origin.
+
+    Parameters
+    ----------
+    return_removed_slope : bool
+        When False (default), returns ``cog`` alone, bit-identical to this
+        function's pre-drift-term behaviour. When True, returns
+        ``(cog, slope)`` where ``slope`` is the per-channel linear slope
+        (m/sample) that the final detrend step subtracted from the
+        (otherwise identical) position path — the quantity
+        `wrist_pivot`'s drift term is derived from.
     """
     rots = Rotation.from_quat(quat[:, [1, 2, 3, 0]])
 
@@ -440,5 +492,27 @@ def rest_to_rest_cog(accel: np.ndarray, quat: np.ndarray,
 
     # 4. Integrate -> position, detrend to center the path around the origin.
     pos = np.cumsum(vel, axis=0) * config.DT
-    return _detrend_rest_to_rest(pos)
+    slope = _linear_slope(pos)
+    cog = pos - np.outer(np.arange(len(pos), dtype=float), slope)
+    if return_removed_slope:
+        return cog, slope
+    return cog
+
+
+def wrist_drift_slope(accel: np.ndarray, gyro_deg: np.ndarray,
+                      alpha: float = config.COMP_FILTER_ALPHA) -> np.ndarray:
+    """The position slope `_detrend_rest_to_rest` removes, m/sample, from RAW inputs.
+
+    One-call entry point for the scripts: it runs exactly the same preamble
+    `reconstruct` does, so the slope it returns is the one the committed
+    `Swing.pivot` was built with.  Measured on `data/raw_data.csv`:
+    slope * 400 = [-1.2967, +0.1899, -0.5044] m, |.| = 1.4042 m.
+    """
+    accel_lp = _lowpass(accel)
+    gyro_lp = _lowpass(gyro_deg)
+    gravity = estimate_gravity(accel_lp)
+    quat = integrate_orientation(accel_lp, gyro_lp, gravity, alpha=alpha)
+    _cog, slope = rest_to_rest_cog(accel_lp, quat, gravity,
+                                   return_removed_slope=True)
+    return slope
 
